@@ -1,7 +1,7 @@
 # GX10 Capability Report (redacted)
 
 Date: 2026-10-19
-Verified on: `zoey` (100.108.85.109), Tailnet `papaya.ch0mp@`
+Verified on: `zoey` (100.108.85.109), Tailnet `tail831c33.ts.net` (login `papaya.ch0mp@gmail.com`)
 Operator: `jp`
 
 This report supports task 1.1 of `openspec/changes/gx10-usage-service`. It lists

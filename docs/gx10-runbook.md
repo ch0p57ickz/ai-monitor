@@ -25,30 +25,38 @@ backup/restore procedure as reviewed-but-unexecuted until the first install.
 ## Verify the service locally (no install)
 
 ```sh
-# From the repository root. Starts the service on a loopback port with a fresh
-# temporary data directory, uses the real adapters, and exercises the HTTP
-# contract. Exits non-zero if a check fails.
-python3 tools/smoke_check.py
+# From the repository root, with the package importable. Starts the service on a
+# loopback port with a fresh temporary data directory, uses the real adapters, and
+# exercises the HTTP contract. Exits non-zero if a check fails, and removes the
+# temporary directory unless AI_MONITOR_SMOKE_DIR names it.
+PYTHONPATH=. python3 tools/smoke_check.py
 
-# To check a deployment's own settings, point it at that deployment's config.
-# Its provider settings and credentials are used, but data_dir and api_port are
-# overridden, so the running service and its database are untouched. Reading
-# /etc/ai-monitor/config.json (mode 0640) needs root.
-sudo python3 tools/smoke_check.py --config /etc/ai-monitor/config.json
+# To check a deployment's own settings, point it at that deployment's config. Its
+# adapters, provider binaries, and credentials are used, but data_dir and api_port
+# are overridden, so the running service and its database are untouched. Reading
+# /etc/ai-monitor/config.json (mode 0640) needs root, and sudo resets the
+# environment, so pass PYTHONPATH through explicitly.
+sudo -E env PYTHONPATH=. python3 tools/smoke_check.py --config /etc/ai-monitor/config.json
 ```
 
-The smoke check asserts: `/health` lists all four source IDs, `/api/v1/usage`
-returns `observations: []` before any source succeeds, history reports `hours`
-and `truncated`, every response is `Cache-Control: private, no-store`, no
-response contains credential-looking text, responses stay fast while providers
-fail, a non-loopback address cannot reach the port, and each of the four read
-endpoints answers 200 within the response cap — the cap of the deployment named
-by `--config`, or the built-in default when none is given. A 413 fails the check
-rather than passing quietly, because a widget has to be able to fetch these.
+The smoke check **asserts**: every response is `Cache-Control: private, no-store`;
+no response contains credential-looking text; each of the four read endpoints
+(`/api/v1/version`, `/health`, `/api/v1/usage`, and a small history query) answers
+200 within the response cap; and a non-loopback address cannot reach the port. The
+cap is the one from the deployment named by `--config`, or the built-in default
+when none is given. A 413 fails the check rather than passing quietly, because a
+widget has to be able to fetch these.
 
-A fresh data directory is used unless `AI_MONITOR_SMOKE_DIR` names one. Reusing a
-directory accumulates observations and makes the printed history size grow
-between runs, so the sizes are only comparable on a fresh directory.
+It also **reports** what it saw, without asserting it: the `/health` source IDs and
+statuses, whether `/api/v1/usage` was still empty before any source succeeded, the
+history `hours` and `truncated` fields, and each response's size.
+
+With `codex_transport = "socket"`, a `--config` run attaches to the same app-server
+socket the running service uses. A fresh data directory is used unless
+`AI_MONITOR_SMOKE_DIR` names one; reusing a directory accumulates observations and
+makes the printed history size grow between runs, so sizes are comparable only on
+a fresh directory. A fresh directory holds one observation per source, not the
+populated payloads a long-running deployment has.
 
 ## Soak the service locally (task 5.1 evidence)
 
@@ -380,8 +388,9 @@ identity and devices" is a policy-file change in the admin console, not a flag o
   policy has to be read in the console first, and the change is to narrow it.
 - Not every name is a valid selector. A bare node name works only if the policy
   defines it under `hosts`; users are login names such as
-  `papaya.ch0mp@gmail.com`. A snippet using `zoey` with no `hosts` entry, or
-  `papaya.ch0mp@`, is rejected by the console.
+  `papaya.ch0mp@gmail.com` (`tailscale status --json`, field
+  `User.*.LoginName`). A snippet using `zoey` with no `hosts` entry, or the
+  truncated `papaya.ch0mp@`, is rejected by the console.
 
 With that in mind, the shape to adapt is:
 
