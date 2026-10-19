@@ -151,6 +151,35 @@ Live evidence now exists for the soak across an observed reset and for the
 OpenRouter split; the Tailscale access rules and the systemd install remain
 pending (tasks 5.2-5.4).
 
+### Finding: the unit's sandbox would have starved the Codex child
+
+`deploy/ai-monitor.service` sets `ProtectSystem=strict`, which mounts the entire
+file system hierarchy read-only, `$HOME` included, while listing only
+`/var/lib/ai-monitor` as writable. The bundled Codex CLI keeps its credentials
+and state in `~/.codex`, so the stdio transport — the default — could not have
+collected on a deployed host.
+
+Checked against the real CLI (2026-10-19):
+
+| Run | `$HOME` | Result |
+| --- | --- | --- |
+| Baseline | the operator's home | `success`, 2 quota windows |
+| Fresh, writable home | empty new directory | `codex account authentication required` — the credentials live in `~/.codex` |
+| Read-only home (mode 0555) | not writable | the child died without answering (`closed the connection`) |
+
+The unit now lists `/home/ai-monitor` in `ReadWritePaths=`, and
+`tests/test_deploy_unit.py` asserts it, so the invariant cannot be dropped
+silently. The installer must create that home (`useradd -m`) before enabling the
+unit, and the *service account* — not the operator — must be signed in to Codex.
+
+Note on how this was checked: the sandbox could not be replicated for a test run
+because systemd does not support `ProtectSystem=` in user services ("the
+underlying kernel functionality is only accessible to privileged processes" —
+`systemd.exec`). A `systemd-run --user` replica silently ignored the directive
+and reported success, so the first attempt proved nothing; the read-only-`$HOME`
+and credential tests above are what actually establish the requirement. The real
+unit still needs a privileged run to confirm (task 5.2).
+
 ## Tailscale Serve readiness
 
 | Item | Value |

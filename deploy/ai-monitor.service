@@ -33,7 +33,14 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
+# ProtectSystem=strict mounts the entire hierarchy read-only, $HOME included, so
+# the service account's own home must be listed explicitly or the bundled Codex
+# CLI cannot write ~/.codex. Verified on 2026-10-19: `codex app-server` dies
+# outright when $HOME is read-only, and fails with "codex account authentication
+# required" when $HOME has no ~/.codex/auth.json. ReadWritePaths= requires the
+# path to exist, so create the account's home (`useradd -m`) before enabling.
 ReadWritePaths=/var/lib/ai-monitor
+ReadWritePaths=/home/ai-monitor
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=false

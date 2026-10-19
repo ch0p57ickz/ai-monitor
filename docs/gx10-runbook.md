@@ -154,7 +154,17 @@ sudo systemctl enable --now ai-monitor
 Give the service account its own provider sign-in before expecting data:
 
 ```sh
-# Codex, default (stdio): nothing to prepare. The service starts
+# Codex state and credentials live in the service account's own ~/.codex, and
+# the unit's ProtectSystem=strict makes $HOME read-only unless it is listed in
+# ReadWritePaths= — which deploy/ai-monitor.service does for /home/ai-monitor.
+# Verified on 2026-10-19: `codex app-server` dies outright when $HOME is
+# read-only, and fails with "codex account authentication required" when that
+# home has no ~/.codex/auth.json. So sign the *service account* in, not the
+# operator, and check the home exists before enabling the unit:
+id ai-monitor && sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" && echo "home is writable"
+sudo -u ai-monitor codex login      # or copy an auth.json into /home/ai-monitor/.codex
+
+# Codex, default (stdio): nothing else to prepare. The service starts
 # `codex app-server --listen stdio://` itself and speaks the protocol over the
 # child's pipes, which needs no daemon and no host policy change. The rate-limit
 # read runs no sandboxed tools, so the AppArmor restriction described below does
