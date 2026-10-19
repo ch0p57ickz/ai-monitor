@@ -362,18 +362,27 @@ printing the credential; it exits `2` when no credential is present.
 ## Widget response sizes against the configured cap
 
 Task 5.3 also asks for confirmation that widget response sizes stay within the
-configured cap. Measured against this host with the real adapters
-(`tools/smoke_check.py`, which now asserts the cap of whichever deployment it is
-pointed at rather than the built-in default):
+configured cap. Two different measurements, with different fixtures — the numbers
+are only meaningful with the fixture attached.
+
+**Real adapters on this host**, fresh data directory, one polling cycle
+(`python3 tools/smoke_check.py`; the totals move by a byte or two between runs
+because provider values change, but the fixture no longer does):
 
 | Endpoint | Bytes |
 | --- | --- |
 | `/api/v1/version` | 48 |
 | `/health` | 833 |
-| `/api/v1/usage` | 928 |
-| `/api/v1/usage/history?hours=1&limit=5` | 960 |
+| `/api/v1/usage` | 929 |
+| `/api/v1/usage/history?hours=1&limit=5` | 961 |
 
-Worst case, with all four sources populated and 200 stored observations each:
+Only `codex` succeeds on this host, so that table covers one source, not four.
+
+**Worst case, seeded**: four sources with 200 stored observations each, written
+directly to a database by a throwaway script rather than by the committed tools —
+`antigravity` and the OpenRouter sources cannot succeed here, so this shape
+cannot be produced by polling this host. Reproduce by seeding a database and
+calling `history_payload` / `usage_payload`.
 
 | Request | Bytes | Outcome |
 | --- | --- | --- |
@@ -385,17 +394,23 @@ Worst case, with all four sources populated and 200 stored observations each:
 The last row is the interesting one. The maximum configured `limit` of 500 does
 not fit under the 262144-byte cap with four sources populated, so the endpoint
 drops the oldest rows until it fits and reports `truncated`. It degrades instead
-of failing, and the newest reading is always kept. Both the truncation check and
-the HTTP layer measure the same bytes — `json.dumps(...).encode("utf-8")` — and
-`json.dumps` escapes non-ASCII by default, so a label containing `·` cannot make
-the body that is sent larger than the body that was measured.
+of failing, and the newest reading is always kept. That invariant is what
+`tests/test_service.py` pins (byte cap and `truncated`); the exact row count is a
+property of the fixture, not a guarantee.
+
+Both the truncation check and the HTTP layer measure the same bytes —
+`json.dumps(...).encode("utf-8")` — and `json.dumps` escapes non-ASCII by
+default, so a label containing `·` cannot make the body that is sent larger than
+the body that was measured.
 
 One cliff is worth knowing. `/api/v1/usage` carries every source in a single
-response and has no truncation, so one source reporting **774** windows or more
-pushes it over the cap and the endpoint returns 413 — the widget then gets
-nothing, including from the healthy sources. Real providers report single digits,
-the spec documents 413 for an oversized body, and bounding the window count is a
-design decision rather than a bug fix, so this is recorded rather than changed.
+response and has no truncation, so enough windows in one source push it over the
+cap and the endpoint returns 413 — the widget then gets nothing, including from
+the healthy sources. On the seeded fixture that boundary is 774 windows, which is
+a function of window width (~338 bytes each) rather than a fixed number; a
+narrower window moves it. Real providers report single digits, the spec documents
+413 for an oversized body, and bounding the window count is a design decision
+rather than a bug fix, so this is recorded rather than changed.
 
 ## Capability summary for adapter enablement
 

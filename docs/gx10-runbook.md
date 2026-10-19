@@ -25,17 +25,30 @@ backup/restore procedure as reviewed-but-unexecuted until the first install.
 ## Verify the service locally (no install)
 
 ```sh
-# From the repository root. Starts the service on a loopback port with a
+# From the repository root. Starts the service on a loopback port with a fresh
 # temporary data directory, uses the real adapters, and exercises the HTTP
 # contract. Exits non-zero if a check fails.
 python3 tools/smoke_check.py
+
+# To check a deployment's own settings, point it at that deployment's config.
+# Its provider settings and credentials are used, but data_dir and api_port are
+# overridden, so the running service and its database are untouched. Reading
+# /etc/ai-monitor/config.json (mode 0640) needs root.
+sudo python3 tools/smoke_check.py --config /etc/ai-monitor/config.json
 ```
 
 The smoke check asserts: `/health` lists all four source IDs, `/api/v1/usage`
 returns `observations: []` before any source succeeds, history reports `hours`
 and `truncated`, every response is `Cache-Control: private, no-store`, no
 response contains credential-looking text, responses stay fast while providers
-fail, and a non-loopback address cannot reach the port.
+fail, a non-loopback address cannot reach the port, and each of the four read
+endpoints answers 200 within the response cap — the cap of the deployment named
+by `--config`, or the built-in default when none is given. A 413 fails the check
+rather than passing quietly, because a widget has to be able to fetch these.
+
+A fresh data directory is used unless `AI_MONITOR_SMOKE_DIR` names one. Reusing a
+directory accumulates observations and makes the printed history size grow
+between runs, so the sizes are only comparable on a fresh directory.
 
 ## Soak the service locally (task 5.1 evidence)
 
@@ -347,23 +360,39 @@ host, so the operator can confirm state before and after the change; only
 | Tailnet domain | `zoey.tail831c33.ts.net` |
 | Served URL after this change | `https://zoey.tail831c33.ts.net/` (port 443 needs no suffix) |
 | Ports already served, tailnet only | `3773`, `8443`, `8444`, `8445` |
-| Port 443 | free — not served, and nothing listens on it locally |
-| `127.0.0.1:8732` | free — the service's `api_port` |
+| Port 443 | free — not among the served mappings, and `ss -ltn` shows nothing listening on it |
+| `127.0.0.1:8732` | free — the service's `api_port`, per `ss -ltn` |
 | Funnel | off. `tailscale funnel status` lists every mapping as `(tailnet only)` |
 | HTTPS certificates | enabled in the tailnet — the existing Serve mappings already use `ts.net` names |
 
+The served-mapping rows come from `tailscale serve status`; the port-availability
+rows come from `ss -ltn`, which is a different command and a different claim.
+
 ### Restricting access to identity and devices
 
-Tailscale Serve inherits the tailnet policy file, which is **deny-by-default**:
-a device or user can reach a served port only if a policy rule allows it. So
-"restrict to the intended identity and devices" is a policy-file change in the
-admin console, not a flag on `tailscale serve`. The rule shape is:
+Tailscale Serve inherits the tailnet policy file, so "restrict to the intended
+identity and devices" is a policy-file change in the admin console, not a flag on
+`tailscale serve`. Two things about that file matter before editing it:
+
+- It is *evaluated* deny-by-default, but the policy a tailnet starts with allows
+  everything, and rules union rather than override. Adding a grant for port `443`
+  does not narrow a broader allow rule that is already there, so the existing
+  policy has to be read in the console first, and the change is to narrow it.
+- Not every name is a valid selector. A bare node name works only if the policy
+  defines it under `hosts`; users are login names such as
+  `papaya.ch0mp@gmail.com`. A snippet using `zoey` with no `hosts` entry, or
+  `papaya.ch0mp@`, is rejected by the console.
+
+With that in mind, the shape to adapt is:
 
 ```jsonc
 {
+  "hosts": {
+    "zoey": "100.108.85.109"          // or dst may name a tag or the IP directly
+  },
   "grants": [
     {
-      "src": ["papaya.ch0mp@"],          // or the specific devices below
+      "src": ["papaya.ch0mp@gmail.com"],   // narrow this to the devices in mind
       "dst": ["zoey"],
       "ip": ["tcp:443"]
     }
@@ -371,10 +400,11 @@ admin console, not a flag on `tailscale serve`. The rule shape is:
 }
 ```
 
-Treat that as a shape to adapt, not a verified change: the current policy is not
-visible from the CLI, and the four existing Serve mappings suggest the intended
-devices already reach this node on other ports. Adding port `443` for the same
-sources is the smallest change that satisfies the task.
+Treat it as a starting point, not a verified change: the current policy is not
+visible from the CLI, the console may reject it as written against that policy,
+and the four existing Serve mappings suggest the intended devices already reach
+this node on other ports. Confirming which rule governs the new port is part of
+the task, not a step that can be skipped.
 
 ### Acceptance checks (operator present)
 
