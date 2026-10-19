@@ -28,6 +28,9 @@
 
   "account_digest_key": "",
 
+  "pace_tolerance": 5.0,
+  "response_cap_bytes": 262144,
+
   "retention_days": 30,
   "history_default_hours": 24,
   "history_max_hours": 168,

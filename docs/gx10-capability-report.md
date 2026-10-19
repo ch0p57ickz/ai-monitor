@@ -183,6 +183,50 @@ and reported success, so the first attempt proved nothing; the read-only-`$HOME`
 and credential tests above are what actually establish the requirement. The real
 unit still needs a privileged run to confirm (task 5.2).
 
+## Deployment procedure verification (tasks 5.2 and 5.4, unprivileged parts)
+
+Tasks 5.2 and 5.4 need `sudo` and a deployed host, but most of what they ask for
+is about the *procedure* rather than the host, and a procedure is better checked
+before it is run as root. `tools/backup_restore_check.py` runs the runbook's
+backup and restore commands in a temporary directory against the real service
+and the real `sqlite3` CLI: it backs up online while the service runs, deletes
+the database and its WAL sidecars, restores, compares the restored rows with what
+was captured, and then starts a worker on the restored file to confirm the API
+serves the cached observation. All of it passes on this host.
+
+| Check | Result |
+| --- | --- |
+| Online backup while the service runs (`.backup`) | Pass — consistent, and it works with the `-wal` file present |
+| Restore after losing the database and its sidecars (`.restore`) | Pass — `pragma integrity_check` reports `ok`, and every row matches the capture |
+| A restart on the restored database serves cached data (5.2) | Pass — `/api/v1/usage` returns the restored observation |
+| The example config loads through the real `Config` | Pass — and now covers every field the loader accepts |
+
+### Finding: the documented backup command failed
+
+The runbook's backup step ran `install -m 0600 ... /var/lib/ai-monitor/backups/`
+without ever creating that directory, and it backed up into the state directory
+before *copying* the result into `backups/`, leaving a stray database beside the
+live one. Reproduced:
+
+```
+$ install -m 0600 usage.db /var/lib/ai-monitor/backups/
+install: cannot create regular file '/var/lib/ai-monitor/backups/': Not a directory
+```
+
+The procedure now creates the directory with the right owner and mode, writes the
+backup straight into it, clears stale `-wal`/`-shm` sidecars before a restore,
+checks integrity before starting on the restored file, and lists `backups/` in
+the layout table. `deploy/config.example.json` also omitted `pace_tolerance` and
+`response_cap_bytes`, which the loader accepts; both are now present.
+
+Still outstanding for 5.2 and 5.4, all needing the host:
+
+- installing the unit and confirming it starts under systemd;
+- a `systemctl restart` (the check above restarts the process, not the unit);
+- the journal redaction check, since `journalctl` only knows installed units;
+- verifying the upgrade, rollback and rotation procedures against the deployed
+  layout once it exists.
+
 ## Tailscale Serve readiness
 
 | Item | Value |

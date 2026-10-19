@@ -17,6 +17,7 @@ approval. Treat the steps as reviewed-but-unexecuted until the first install.
 | `/opt/ai-monitor` | Code checkout and virtualenv (`venv/`) |
 | `/etc/ai-monitor/config.json` | Configuration, mode `0640`, owner `root`, group `ai-monitor` |
 | `/var/lib/ai-monitor/usage.db` | SQLite database (WAL), persistent state |
+| `/var/lib/ai-monitor/backups/` | Database backups, mode `0700` (created by the backup procedure, not by the unit) |
 | `/home/ai-monitor` | Service account home (Codex socket, Antigravity CLI) |
 | `deploy/ai-monitor.service` | Unit file in this repository |
 
@@ -239,9 +240,16 @@ The only stateful artifact is the SQLite database. Use the online backup so a
 running service stays consistent:
 
 ```sh
-sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".backup '/var/lib/ai-monitor/backup-$(date +%F).db'"
-sudo install -m 0600 -o ai-monitor -g ai-monitor \
-  /var/lib/ai-monitor/backup-$(date +%F).db /var/lib/ai-monitor/backups/
+# The state directory is created by StateDirectory= in the unit, but the backup
+# target is not: `install` fails with "Not a directory" rather than creating it.
+sudo install -d -m 0700 -o ai-monitor -g ai-monitor /var/lib/ai-monitor/backups
+
+# Online backup: safe while the service runs, because SQLite takes the locks
+# itself. Write straight into the backup directory so no second copy is left
+# loose in the state directory.
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
+  ".backup '/var/lib/ai-monitor/backups/usage-$(date +%F).db'"
+sudo chmod 0600 /var/lib/ai-monitor/backups/usage-$(date +%F).db
 ```
 
 Also back up `/etc/ai-monitor/config.json` to a restricted location (it holds
@@ -252,9 +260,20 @@ Restore:
 
 ```sh
 sudo systemctl stop ai-monitor
-sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".restore '/var/lib/ai-monitor/backups/backup-YYYY-MM-DD.db'"
+# If the database file itself was lost, clear stale WAL sidecars first: a
+# leftover -wal can be replayed over the restored file.
+sudo rm -f /var/lib/ai-monitor/usage.db-wal /var/lib/ai-monitor/usage.db-shm
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
+  ".restore '/var/lib/ai-monitor/backups/usage-YYYY-MM-DD.db'"
+# Confirm the restored file before starting on it.
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
+  "pragma integrity_check; select count(*) from observations;"
 sudo systemctl start ai-monitor
 ```
+
+`tools/backup_restore_check.py` runs these commands end to end against a live
+service in a temporary directory, so the procedure can be checked before relying
+on it on a host.
 
 ## Rollback
 
