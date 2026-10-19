@@ -421,16 +421,17 @@ install from a copy of the checkout, and run the console script the unit runs.
 
 | Step | Result |
 | --- | --- |
-| `pip install <checkout>` | Pass — builds a wheel and installs `ai-monitor` 0.1.0 |
+| `pip install <checkout>` (setuptools obtainable from an index or cache) | Pass — builds a wheel and installs `ai-monitor` 0.1.0 |
 | `ai-monitor --version` | Pass — `ai-monitor 0.1.0` |
 | Service from the installed script | Pass — serves `/api/v1/version` and `/health`, shuts down cleanly on SIGTERM |
 | Upgrade (package as 0.2.0, reinstall) | Pass — all three version sources report 0.2.0 |
 | Rollback (back to 0.1.0, reinstall) | Pass — all three report 0.1.0 |
+| Offline: `pip wheel` then install the wheel into a clean venv | Pass — installs and runs with no index and no setuptools on the target |
 
 What is *not* covered: systemd starting the unit, the unit's sandbox, and the
 service account's own provider sign-in. Those need the host.
 
-### Finding: the install needs network, or two extra flags
+### Finding: the install needs network, or a prebuilt wheel
 
 `pip install <checkout>` uses build isolation, which installs `setuptools>=68`
 into a temporary build environment. A Python 3.12 venv has no setuptools of its
@@ -440,11 +441,17 @@ own, so with no index the install fails:
 pip subprocess to install build dependencies did not run successfully
 ```
 
-A pre-warmed pip cache does not rescue it (verified). The working offline form is
-`python3 -m venv --system-site-packages` plus `pip install --no-build-isolation`,
-which builds with the system setuptools — 68.1.2 here, satisfying `>=68`. The
-runbook now uses that form and notes that a host with network access can use the
-plain commands.
+A pre-warmed pip cache does not rescue it (verified). The offline answer is a
+prebuilt wheel: build it where setuptools is available, then install it. Installing
+a wheel builds nothing, so the target needs neither setuptools nor an index —
+verified by building `ai_monitor-0.1.0-py3-none-any.whl` and installing it into a
+clean venv that has no setuptools at all.
+
+`--system-site-packages` looks like a simpler offline fix and is a trap. It puts
+the system site-packages on the venv's path, so pip treats a system-wide
+`ai-monitor` as already installed and can report success while leaving the old
+version in place — precisely the silent failed upgrade this section is about. The
+runbook uses the wheel form and warns against the venv flag.
 
 ### Finding: the reported version had two sources, and they drifted
 

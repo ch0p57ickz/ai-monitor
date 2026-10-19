@@ -158,15 +158,8 @@ sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbi
 # 2. Code and virtualenv, owned by the service account.
 sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
 sudo -u ai-monitor git clone <repo-url> /opt/ai-monitor
-# --system-site-packages and --no-build-isolation let the install work with no
-# network: a Python 3.12 venv has no setuptools of its own, so the default
-# isolated build tries to fetch setuptools from an index and fails offline
-# (verified: exit 1, "pip subprocess to install build dependencies did not run
-# successfully"). With these flags the build uses the system setuptools
-# (68.1.2 on this host, which satisfies the >=68 requirement). If the host has
-# network access, the plain `python3 -m venv` and `pip install` work as they are.
-sudo -u ai-monitor python3 -m venv --system-site-packages /opt/ai-monitor/venv
-sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-build-isolation /opt/ai-monitor
+sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 
 # Confirm the console script is on PATH inside the venv before going further.
 # The unit runs this exact binary, and `ai-monitor --version` must print the
@@ -194,8 +187,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ai-monitor
 ```
 
-Give the service account its own provider sign-in before expecting data:
+### Installing without network access
 
+`pip install /opt/ai-monitor` builds the package with build isolation, which
+installs `setuptools>=68` into a temporary build environment. A Python 3.12 venv
+has no setuptools of its own, so with no index the install fails:
+
+```
+pip subprocess to install build dependencies did not run successfully
+```
+
+Do not work around that with `--system-site-packages`. It adds the system
+site-packages to the venv's path, and pip then treats a system-wide copy of
+`ai-monitor` as already installed, so an upgrade can report success while leaving
+the old version in place — the failure this section exists to avoid.
+
+Build a wheel where setuptools is available, then install the wheel. Installing a
+wheel builds nothing, so the service host needs neither setuptools nor an index:
+
+```sh
+# On a host with setuptools, or with network access:
+python3 -m pip wheel --no-build-isolation -w dist/ /opt/ai-monitor
+
+# On the service host, into its clean venv:
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-index /path/to/ai_monitor-*.whl
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
+```
+
+Give the service account its own provider sign-in before expecting data:
 ```sh
 # Codex state and credentials live in the service account's own ~/.codex, and
 # the unit's ProtectSystem=strict makes $HOME read-only unless it is listed in
@@ -262,7 +281,11 @@ journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
 ```sh
 sudo -u ai-monitor git -C /opt/ai-monitor fetch --tags
 sudo -u ai-monitor git -C /opt/ai-monitor checkout <tag-or-sha>
-sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-build-isolation /opt/ai-monitor
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+# Without network access, install a wheel built as described under "Installing
+# without network access" instead. Do not add --system-site-packages to the venv
+# to make this work: pip then treats a system copy as already installed and can
+# skip the upgrade while reporting success.
 sudo systemctl restart ai-monitor
 systemctl status ai-monitor --no-pager
 

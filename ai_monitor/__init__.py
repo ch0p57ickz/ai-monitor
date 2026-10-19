@@ -18,11 +18,19 @@ def _resolve_version() -> str:
     ``pip show`` agreeing after an upgrade. A second hardcoded copy would let them
     disagree: an upgrade would report success while the service still announced
     the old version, so the upgrade would look like it had not taken effect.
+
+    The lookup is deliberately defensive. Metadata can be corrupt or unreadable
+    (a non-UTF-8 ``METADATA`` raises ``UnicodeDecodeError``, which is not a
+    ``PackageNotFoundError``), and a dist-info with missing metadata makes the
+    call return ``None`` rather than raise. Either one escaping here would break
+    the import of the whole package, so every failure falls back to the source
+    version — a wrong-but-harmless version string beats an unimportable service.
     """
     try:
-        return _metadata.version("ai-monitor")
-    except _metadata.PackageNotFoundError:
+        installed = _metadata.version("ai-monitor")
+    except Exception:  # noqa: BLE001 - see the docstring: never break the import
         return SOURCE_VERSION
+    return installed or SOURCE_VERSION
 
 
 __version__ = _resolve_version()
