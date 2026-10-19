@@ -35,6 +35,27 @@ and `truncated`, every response is `Cache-Control: private, no-store`, no
 response contains credential-looking text, responses stay fast while providers
 fail, and a non-loopback address cannot reach the port.
 
+## Soak the service locally (task 5.1 evidence)
+
+```sh
+# Runs the real service and real adapters for a bounded interval, sampling the
+# loopback API throughout. Exits non-zero if an expectation fails; writes only
+# to a temporary data directory.
+python3 tools/soak_check.py --seconds 150
+```
+
+It reports response-latency percentiles, per-source status transitions, and
+observation/`truncated` counts, then asserts: at least one source reaches
+healthy, every response stays well under the per-attempt deadline, exactly one
+committed observation is exposed once a source first succeeds, and failing
+sources coexist independently. Results are recorded in
+`docs/gx10-capability-report.md`.
+
+```sh
+# Collects Codex usage through the real adapter (spawns codex itself).
+python3 tools/codex_live_check.py
+```
+
 ## Install (task 5.2, first time)
 
 ```sh

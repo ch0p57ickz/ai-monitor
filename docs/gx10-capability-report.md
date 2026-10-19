@@ -137,6 +137,23 @@ Tailscale access rules remain pending (tasks 5.1-5.3).
 | Current HTTPS publications | Not verified (requires `tailscale serve status`) |
 | Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
 
+## Verification results (local, 2026-10-19)
+
+Both tools run against this host's real providers; neither reads credentials.
+
+| Check | Tool | Result |
+| --- | --- | --- |
+| HTTP contract, loopback-only binding | `tools/smoke_check.py` | Pass — 4 source IDs in `/health`, `observations: []` before first success, `Cache-Control: private, no-store`, non-loopback address refused, no credential-looking text in responses |
+| API latency independent of provider polls | `tools/soak_check.py` (150 s) | Pass — median 1.0 ms, p95 1.8 ms, max 14.2 ms across 450 requests |
+| First-failure omission | `tools/soak_check.py` | Pass — usage observation counts went 0 → 1 and never exposed a never-successful source |
+| Independent per-source failure | `tools/soak_check.py` | Pass — `codex` healthy while `antigravity` reported `unavailable` and both OpenRouter sources reported `operator_action` |
+| Bounded history | `tools/soak_check.py` | Pass — `hours` present, `truncated` reported |
+| Codex collection through stdio | `tools/soak_check.py`, `tools/codex_live_check.py` | Pass — real account data, no collection failures over 150 s |
+
+Not yet verified: a soak across an observed reset (the 5-hour window resets
+hours away), and partial OpenRouter results (no usable OpenRouter credential on
+this host).
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |
