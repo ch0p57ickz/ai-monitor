@@ -331,11 +331,63 @@ The service binds `127.0.0.1` only. Publication is via Tailscale Serve, never
 Funnel:
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:8732
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8732
 tailscale serve status
 ```
 
-Then restrict access to the intended tailnet identity and devices and confirm
-that a disallowed device is denied, and that `tailscale funnel status` shows
-Funnel disabled. This requires the tailnet access rules and the Mac/iPhone
-devices, so it is executed with the operator present.
+`tailscale serve status` and `tailscale funnel status` run without `sudo` on this
+host, so the operator can confirm state before and after the change; only
+`tailscale serve` itself needs privileges.
+
+### Host state as surveyed (2026-10-19)
+
+| Fact | Value |
+| --- | --- |
+| Node | `zoey` (`100.108.85.109`) |
+| Tailnet domain | `zoey.tail831c33.ts.net` |
+| Served URL after this change | `https://zoey.tail831c33.ts.net/` (port 443 needs no suffix) |
+| Ports already served, tailnet only | `3773`, `8443`, `8444`, `8445` |
+| Port 443 | free — not served, and nothing listens on it locally |
+| `127.0.0.1:8732` | free — the service's `api_port` |
+| Funnel | off. `tailscale funnel status` lists every mapping as `(tailnet only)` |
+| HTTPS certificates | enabled in the tailnet — the existing Serve mappings already use `ts.net` names |
+
+### Restricting access to identity and devices
+
+Tailscale Serve inherits the tailnet policy file, which is **deny-by-default**:
+a device or user can reach a served port only if a policy rule allows it. So
+"restrict to the intended identity and devices" is a policy-file change in the
+admin console, not a flag on `tailscale serve`. The rule shape is:
+
+```jsonc
+{
+  "grants": [
+    {
+      "src": ["papaya.ch0mp@"],          // or the specific devices below
+      "dst": ["zoey"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
+```
+
+Treat that as a shape to adapt, not a verified change: the current policy is not
+visible from the CLI, and the four existing Serve mappings suggest the intended
+devices already reach this node on other ports. Adding port `443` for the same
+sources is the smallest change that satisfies the task.
+
+### Acceptance checks (operator present)
+
+1. **Intended client — macOS.** From `jamess-macbook-pro`, open
+   `https://zoey.tail831c33.ts.net/api/v1/version` and confirm the version JSON.
+2. **Intended client — iPhone.** From `iphone182-2`, open
+   `https://zoey.tail831c33.ts.net/health`.
+3. **Denied device.** From a device the policy does *not* allow to reach `zoey` —
+   a tagged service node such as `rumi`, `happier`, or `mira` is the natural
+   choice, since those are not granted access to user devices — confirm the
+   connection fails rather than returning usage data.
+4. **Funnel stays off.** `tailscale funnel status` must keep showing
+   `(tailnet only)` for every mapping, including the new one.
+
+Steps 1-3 need the devices and the policy edit, so they are executed with the
+operator present. Step 4 and the survey above were run without privileges.

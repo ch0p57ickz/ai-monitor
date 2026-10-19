@@ -44,12 +44,25 @@ print("listening on", server.url)
 time.sleep(4.0)  # let one polling cycle finish
 
 
+CAP = config.response_cap_bytes
+SIZES: list[tuple[str, int]] = []
+
+
 def get(path: str):
     started = time.monotonic()
     port = urlparse(server.url).port
     with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as resp:
         body = resp.read()
         elapsed = (time.monotonic() - started) * 1000
+        # The service enforces the cap itself (returning 413 rather than an
+        # oversized body), so this can only fire if that enforcement breaks. It
+        # measures the configured cap of *this* deployment, which a unit test
+        # against the default cannot.
+        if len(body) > CAP:
+            raise SystemExit(
+                f"FAIL: {path} returned {len(body)} bytes, over the {CAP}-byte cap"
+            )
+        SIZES.append((path, len(body)))
         return resp.status, resp.headers, json.loads(body), elapsed
 
 
@@ -88,6 +101,12 @@ else:
         print(f"NON-LOOPBACK REACHABLE at {host_ip}:{port} - FAIL")
     except Exception as exc:  # noqa: BLE001
         print(f"non-loopback {host_ip}:{port} refused: {type(exc).__name__}")
+
+print(f"\nresponse sizes (configured cap {CAP} bytes):")
+for path, size in SIZES:
+    print(f"  {size:7d}  {path}")
+largest = max(size for _, size in SIZES)
+print(f"largest response {largest} bytes, {CAP - largest} bytes under the cap: OK")
 
 server.shutdown()
 worker.stop()

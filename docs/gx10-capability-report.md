@@ -309,8 +309,18 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Item | Value |
 | --- | --- |
 | Serve available | Yes (Tailscale 1.102.4 includes Serve) |
-| Current HTTPS publications | Not verified (requires `tailscale serve status`) |
+| Current HTTPS publications | Four mappings, all `(tailnet only)`: `3773`, `8443`, `8444`, `8445`; port `443` is free |
+| Funnel | Off — `tailscale funnel status` reports every mapping as `(tailnet only)` |
+| HTTPS certificates | Enabled in the tailnet (the existing mappings already use `ts.net` names) |
+| Node and domain | `zoey` (`100.108.85.109`), `zoey.tail831c33.ts.net` |
+| Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
+| Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync` — which are not granted access to user devices |
 | Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
+
+Serve access control is the tailnet policy file, which is deny-by-default and not
+visible from the CLI, so the access rules themselves remain unverified. The
+survey, `tailscale serve status`, and `tailscale funnel status` all ran without
+privileges; `tailscale serve` itself does not.
 
 ## Verification results (local, 2026-10-19)
 
@@ -348,6 +358,44 @@ current-key stream's *success* path was exercised with an invalid key
 only a management key is available on this host. `tools/openrouter_live_check.py`
 runs both streams and reports each one's status and error category without
 printing the credential; it exits `2` when no credential is present.
+
+## Widget response sizes against the configured cap
+
+Task 5.3 also asks for confirmation that widget response sizes stay within the
+configured cap. Measured against this host with the real adapters
+(`tools/smoke_check.py`, which now asserts the cap of whichever deployment it is
+pointed at rather than the built-in default):
+
+| Endpoint | Bytes |
+| --- | --- |
+| `/api/v1/version` | 48 |
+| `/health` | 833 |
+| `/api/v1/usage` | 928 |
+| `/api/v1/usage/history?hours=1&limit=5` | 960 |
+
+Worst case, with all four sources populated and 200 stored observations each:
+
+| Request | Bytes | Outcome |
+| --- | --- | --- |
+| `/api/v1/usage` | 3201 | served |
+| `/api/v1/usage/history?hours=168&limit=100` | 78042 | served |
+| `/api/v1/usage/history?hours=168&limit=250` | 194371 | served |
+| `/api/v1/usage/history?hours=168&limit=500` | 261945 | served — 336 rows, `truncated: true` |
+
+The last row is the interesting one. The maximum configured `limit` of 500 does
+not fit under the 262144-byte cap with four sources populated, so the endpoint
+drops the oldest rows until it fits and reports `truncated`. It degrades instead
+of failing, and the newest reading is always kept. Both the truncation check and
+the HTTP layer measure the same bytes — `json.dumps(...).encode("utf-8")` — and
+`json.dumps` escapes non-ASCII by default, so a label containing `·` cannot make
+the body that is sent larger than the body that was measured.
+
+One cliff is worth knowing. `/api/v1/usage` carries every source in a single
+response and has no truncation, so one source reporting **774** windows or more
+pushes it over the cap and the endpoint returns 413 — the widget then gets
+nothing, including from the healthy sources. Real providers report single digits,
+the spec documents 413 for an oversized body, and bounding the window count is a
+design decision rather than a bug fix, so this is recorded rather than changed.
 
 ## Capability summary for adapter enablement
 
