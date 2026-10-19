@@ -277,8 +277,24 @@ The same value reaches a widget payload. Both mechanisms are now in place:
 Identifiers are masked exactly, never heuristically: the redactor masks our own
 32-character hex account digest, so applying the heuristic to `account_id` or a
 window id would turn every account into the same `[redacted]` and merge unrelated
-buckets. `tests/test_secret_masking.py` pins that, and re-running the stand-in now
-shows the value masked in the payload and in SQLite.
+buckets. That boundary is exactly 32 characters — the real `derive_account_id`
+output — which `tests/test_secret_masking.py` uses rather than a longer string
+that would not exercise it.
+
+Review then found two provider-supplied fields still open, `observed_at` and
+`account_id`, both of which now go through the choke point as well.
+
+Re-run end to end through the running service — the stand-in echoing the key from
+every field it controls, the worker polling it, and the API serving the result:
+
+```
+canary in /api/v1/usage response: False
+canary in stored observations:    False
+masking present:                  True
+```
+
+The value is masked rather than dropped, so the field still reports that the
+provider sent something while withholding what it was.
 
 Still outstanding for 5.2 and 5.4, all needing the host:
 
