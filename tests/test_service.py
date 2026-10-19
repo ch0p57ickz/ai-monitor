@@ -857,6 +857,34 @@ class TestHttpApiContract:
         used = [o["quotaWindows"][0]["usedPercent"] for o in data["observations"]]
         assert used == [7.0, 8.0, 9.0]
 
+    def test_partial_openrouter_access(self, sample_config: Config, sample_db: Database):
+        """Account credits succeed while the key endpoint cannot run: usage and
+        health report the two OpenRouter sources separately."""
+        registry = {
+            "openrouter-account": _ok(
+                {
+                    "status": "success",
+                    "budgets": [
+                        {"id": "acct", "scope": "account", "remaining_usd": 5.0}
+                    ],
+                }
+            ),
+            "openrouter-key": partial(
+                FakeAdapter, error=CollectionError("unavailable", "no key")
+            ),
+        }
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            worker._poll_source(worker._workers["openrouter-account"])
+            worker._poll_source(worker._workers["openrouter-key"])
+            _, usage, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+            _, health, _ = _get(f"http://127.0.0.1:{srv.port}/health")
+        assert [o["source"] for o in usage["observations"]] == ["openrouter-account"]
+        by_id = {s["id"]: s for s in health["sources"]}
+        assert by_id["openrouter-account"]["status"] == "healthy"
+        assert by_id["openrouter-key"]["status"] == "unavailable"
+        assert by_id["openrouter-key"]["errorCategory"] is None
+        assert health["serviceStatus"] == "degraded"
+
     def test_history_trims_to_byte_cap(self, sample_config: Config, sample_db: Database):
         """History trims to the byte cap and sets truncated, never 413."""
         tiny = dataclasses.replace(sample_config, response_cap_bytes=2048)
