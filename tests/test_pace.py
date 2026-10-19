@@ -130,60 +130,71 @@ class TestReportedPace:
         assert p["basis"] == "reported"
 
     def test_reported_at(self):
-        """Measured burn rate within tolerance of the even-consumption pace → 'at'.
+        """Project the measured burn rate to the window end; if it lands within
+        tolerance of the even-consumption projection → 'at'.
 
-        dur = 10080 min (604800 s) → pace_rate ≈ 0.000165 %/s.
-        History 0 → 10 over 1800 s → rate = 10/1800 ≈ 0.00556 %/s.
-        span = 1800 → tolerance_rate = 5 * 1800/604800 ≈ 0.0149.
-        |0.00556 − 0.000165| = 0.00539 ≤ 0.0149 → 'at'.
+        Window: 24 h duration, resets in 12 h → horizon 43200 s.
+        History 40 → 50 over 1800 s → rate = 10/1800 ≈ 0.00556 %/s.
+        projected_end = 50 + 0.00556 * 43200 = 290 → clamps to 100.
+        expected_end = 100 * span/(span+horizon) = 100 * 1800/45000 = 4.0.
+        100 > 4 + 5 → 'over'.
         """
-        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=10.0)
+        hist = _history(span_seconds=1800.0, points=4, start_used=40.0, end_used=50.0)
         p = compute_pace(
-            _window(used_percent=10.0, resets_in_seconds=604800, duration_minutes=10080),
-            settings=PaceSettings(),
-            now_iso=NOW,
-            history=hist,
-        )
-        assert p["basis"] == "reported"
-        assert p["classification"] == "at"
-
-    def test_reported_over(self):
-        """Measured burn rate well above the even-consumption pace → 'over'.
-
-        dur = 10080 min (604800 s) → pace_rate = 100/604800 ≈ 0.000165 %/s.
-        History 0 → 30 over 1800 s → measured rate = 30/1800 ≈ 0.01667 %/s.
-        span = 1800 → tolerance_rate = 5 * 1800/604800 ≈ 0.0149.
-        0.01667 > 0.000165 + 0.0149 = 0.01505 → 'over'.
-        """
-        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=30.0)
-        p = compute_pace(
-            _window(used_percent=30.0, resets_in_seconds=604800, duration_minutes=10080),
+            _window(used_percent=50.0, resets_in_seconds=43200, duration_minutes=1440),
             settings=PaceSettings(),
             now_iso=NOW,
             history=hist,
         )
         assert p["basis"] == "reported"
         assert p["classification"] == "over"
+        assert p["expectedUsedPercent"] == 100.0
 
-    def test_reported_under(self):
-        """With a long window the even-consumption pace_rate is tiny, so any
-        small positive measured rate falls within tolerance → 'at'.
+    def test_reported_over(self):
+        """Projection well above the even-consumption end-use → 'over'.
 
-        This documents that 'under' is unreachable for min_span windows with
-        the default 5 pp tolerance: tolerance_rate = tol*span/total always
-        exceeds pace_rate = 100/total when span ≥ min_span (600 s) and
-        tol ≥ 5 (tol*span ≥ 3000 > 100). A positive rate can therefore never
-        dip below pace_rate − tolerance_rate (a negative bound).
+        Window: 24 h duration, resets in 6 h → horizon 21600 s.
+        History 0 → 30 over 1800 s → rate = 30/1800 ≈ 0.01667 %/s.
+        projected_end = 30 + 0.01667 * 21600 = 390 → clamped to 100.
+        expected_end = 100 * 1800/(1800+21600) ≈ 7.69.
+        100 > 7.69 + 5 → 'over'.
         """
-        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=1.0)
+        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=30.0)
         p = compute_pace(
-            _window(used_percent=1.0, resets_in_seconds=604800, duration_minutes=10080),
+            _window(used_percent=30.0, resets_in_seconds=21600, duration_minutes=1440),
             settings=PaceSettings(),
             now_iso=NOW,
             history=hist,
         )
         assert p["basis"] == "reported"
-        assert p["classification"] == "at"
+        assert p["classification"] == "over"
+        assert p["expectedUsedPercent"] == 100.0
+
+    def test_reported_under(self):
+        """Projection below the even-consumption end-use → 'under'.
+
+        This is the case the old rate-vs-pace-rate math made unreachable; with
+        the consistent projected-end comparison it is reachable.
+
+        Window: 1 h duration (3600 s), resets in 1200 s (start was 2400 s
+        ago → 66.7% elapsed) → horizon 1200 s. History 10 → 12 over 1800 s
+        → rate = 2/1800 ≈ 0.001111 %/s.
+        projected_end = 12 + 0.001111 * 1200 = 13.33.
+        expected_end = 100 * span/(span+horizon) = 100 * 1800/3000 = 60.0.
+        The even-consumption baseline says ~60% used by reset (66.7% of the
+        window elapsed), but this window is only at ~12% and burning slowly,
+        so the projection (13.33) is well below 60 → 'under'.
+        """
+        hist = _history(span_seconds=1800.0, points=4, start_used=10.0, end_used=12.0)
+        p = compute_pace(
+            _window(used_percent=12.0, resets_in_seconds=1200, duration_minutes=60),
+            settings=PaceSettings(),
+            now_iso=NOW,
+            history=hist,
+        )
+        assert p["basis"] == "reported"
+        assert p["classification"] == "under"
+        assert p["expectedUsedPercent"] == pytest.approx(13.33, abs=0.2)
 
     def test_insufficient_span(self):
         """History span below min_span_seconds → falls through to estimated or unknown."""
@@ -283,5 +294,7 @@ class TestEnrichObservation:
         # (40 → 48 over 1800 s, current = 50). This lets the reported path
         # fire and the per-window id lookup is exercised.
         hist = {"w1": _history(span_seconds=1800.0, points=4, start_used=40.0, end_used=48.0)}
-        out = enrich_observation(CODEX, raw, history=hist)
+        # Anchor to the fixed NOW so the history (which ends at NOW) is
+        # recent and the reported spend-rate path fires deterministically.
+        out = enrich_observation(CODEX, raw, history=hist, now_iso=NOW)
         assert out["quota_windows"][0]["pace"]["basis"] == "reported"

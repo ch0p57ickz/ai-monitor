@@ -266,6 +266,43 @@ class TestUsageWorker:
         assert entry is not None
         assert entry["source"] == "codex"
 
+    def test_unexpected_exception_does_not_kill_scheduler(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """A source that raises an unexpected (non-CollectionError) exception
+        must not take down the scheduler: the run loop survives and the
+        remaining sources keep polling (spec: independent per-source polling).
+        """
+
+        class BoomAdapter(SourceAdapter):
+            def fetch(self, config):
+                raise RuntimeError("boom: unexpected failure")
+
+        class OkAdapter(SourceAdapter):
+            def fetch(self, config):
+                return {"status": "success", "quota_windows": [{"id": "ag-w", "used_percent": 30.0}]}
+
+        worker = UsageWorker(
+            config=sample_config,
+            db=sample_db,
+            registry={"codex": BoomAdapter, "antigravity": OkAdapter},
+        )
+
+        # Pre-set stop so _run() does its startup poll and then exits the
+        # while loop after the first iteration (condition false). This makes
+        # _run() run synchronously and deterministically.
+        worker._stop.set()
+
+        # Must not raise, even though codex's adapter blows up.
+        worker._run()
+
+        # Both sources were polled; codex's crash did not abort the loop, so
+        # antigravity (the other source in the loop) still ran to success.
+        assert worker._workers["codex"]._last_polled_at is not None
+        ag = worker._workers["antigravity"]
+        assert ag._last_polled_at is not None
+        assert ag.status == SourceStatus.SUCCESS
+
 
 class TestHttpEndpoints:
     @pytest.fixture

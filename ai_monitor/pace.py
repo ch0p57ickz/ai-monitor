@@ -89,14 +89,16 @@ def _clamp_percent(value: float) -> float:
 
 
 def _classify(expected: float, actual: float, tolerance: float) -> str:
-    """Classify ``actual`` vs. ``expected`` within ``tolerance``.
+    """Classify ``actual`` usage against ``expected`` within ``tolerance``.
 
-    ``at`` when within tolerance, ``under`` when clearly below, ``over``
-    when clearly above.
+    ``at`` when within tolerance, ``over`` when clearly above, ``under``
+    when clearly below.
     """
-    if abs(actual - expected) <= tolerance:
-        return "at"
-    return "under" if actual < expected else "over"
+    if actual > expected + tolerance:
+        return "over"
+    if actual < expected - tolerance:
+        return "under"
+    return "at"
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +199,7 @@ def _reported_pace(
             return None
 
     span = (points[-1][0] - points[0][0]).total_seconds()
-    if span < settings.min_span_seconds:
+    if span <= 0 or span < settings.min_span_seconds:
         return None
 
     delta = points[-1][1] - points[0][1]
@@ -206,9 +208,7 @@ def _reported_pace(
 
     rate = delta / span  # measured percent per second
 
-    # Even-consumption ("on-pace") rate: a window fully consumed by reset
-    # uses 100% over its total duration → 100 / total_seconds percent per
-    # second. The pace is the measured rate relative to this even rate.
+    # The window's total duration, in seconds.
     duration_minutes = _get(window, "durationMinutes", "duration_minutes")
     if duration_minutes is None:
         return None
@@ -218,21 +218,32 @@ def _reported_pace(
         return None
     if total_seconds <= 0:
         return None
-    pace_rate = 100.0 / total_seconds
 
-    # Widen the tolerance as a band on the rate: tolerance_percent of the
-    # window consumed over the measured span is tolerance_percent*span/total
-    # percent per second.
-    tolerance_rate = settings.tolerance_percent * span / total_seconds
-    classification = _classify(pace_rate, rate, tolerance_rate)
-
-    # Expected end-use: project the measured rate forward to the window's
-    # reset (clamped to 0-100). Falls back to the full duration when the
-    # reset horizon is not determinable.
+    # Horizon from now to the window end. Fall back to the remaining
+    # duration when the reset is not determinable, so a projection is still
+    # possible.
     horizon = _horizon_seconds(window, now)
     if horizon is None:
         horizon = max(0.0, total_seconds)
+
+    # Project the measured spend rate forward to the window end.
     projected_end = _clamp_percent(points[-1][1] + rate * horizon)
+
+    # The expected end-use, for comparison, is the even-consumption
+    # projection: the whole window is consumed by reset, so with ``span``
+    # seconds of measured activity and ``horizon`` seconds remaining, the
+    # expected use at reset under even consumption is 100% * span / (span +
+    # horizon). The classification compares the projected end-use against
+    # that baseline with the same tolerance the estimated path uses, so the
+    # classification and expectedUsedPercent always agree.
+    expected_end = _clamp_percent(100.0 * span / (span + horizon))
+    tolerance = settings.tolerance_percent
+    if projected_end > expected_end + tolerance:
+        classification = "over"
+    elif projected_end < expected_end - tolerance:
+        classification = "under"
+    else:
+        classification = "at"
 
     return {
         "classification": classification,
@@ -324,6 +335,11 @@ def _window_bounds(
         # pace against. Treat the reset as implausible rather than
         # reporting a clamped 100% expectation.
         return None, None
+    if start > now:
+        # The window has not started yet (the reset is further out than the
+        # duration). There is no elapsed fraction to pace against, so the
+        # timing is not reliable.
+        return None, None
     return start, end
 
 
@@ -337,12 +353,14 @@ def enrich_observation(
     raw: dict[str, Any],
     settings: Optional[PaceSettings] = None,
     history: Optional[dict[str, list[dict[str, Any]]]] = None,
+    now_iso: Optional[str] = None,
 ) -> dict[str, Any]:
     """Return a new raw payload with ``pace`` filled in for every window.
 
     ``history`` maps a window ``id`` to its list of prior normalized rows.
     Windows with no prior rows still get an estimated pace when the window
-    has a plausible reset and duration.
+    has a plausible reset and duration. ``now_iso`` anchors the pace math to
+    a fixed clock (used by tests); it defaults to the current time.
     """
     out = dict(raw)
     windows = list(raw.get("quota_windows") or [])
@@ -350,7 +368,9 @@ def enrich_observation(
     for i, w in enumerate(windows):
         w = dict(w)
         wid = w.get("id", "")
-        w["pace"] = compute_pace(w, settings=settings, history=history.get(wid, []))
+        w["pace"] = compute_pace(
+            w, settings=settings, history=history.get(wid, []), now_iso=now_iso
+        )
         windows[i] = w
     out["quota_windows"] = windows
     return out

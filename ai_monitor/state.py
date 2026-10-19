@@ -215,7 +215,13 @@ class UsageWorker:
         with self._lock:
             workers = list(self._workers.values())
         for worker in workers:
-            self._poll_source(worker)
+            try:
+                self._poll_source(worker)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "initial poll for %s raised an unexpected error",
+                    worker.source.source,
+                )
 
         last_retention = time.monotonic()
         retention_interval = 86400.0  # run retention at most once per day
@@ -228,7 +234,18 @@ class UsageWorker:
                     break
                 if worker.poll_due():
                     worker.mark_polled()
-                    self._poll_source(worker)
+                    try:
+                        self._poll_source(worker)
+                    except Exception:  # noqa: BLE001
+                        # A single source must never take down the whole
+                        # scheduler. Log and keep polling the other sources;
+                        # this source's state is left as-is and retried next
+                        # cycle (spec: independent per-source polling).
+                        log.exception(
+                            "poll for %s raised an unexpected error; "
+                            "continuing with other sources",
+                            worker.source.source,
+                        )
 
             # Periodic retention sweep
             now_mono = time.monotonic()

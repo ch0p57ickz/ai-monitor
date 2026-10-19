@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from .registry import CollectionError, SourceAdapter
 
@@ -193,9 +193,6 @@ def _label(limit_id: str, duration: Optional[int], kind: str) -> str:
 class CodexAdapter(SourceAdapter):
     """Polls the local Codex app-server rate-limit interface."""
 
-    def __init__(self) -> None:
-        self._rpc = Callable[[str, dict[str, Any]], Any] | None = None
-
     def fetch(self, config) -> dict[str, Any]:
         socket_path = config.codex_app_server_socket
         if not socket_path:
@@ -206,16 +203,14 @@ class CodexAdapter(SourceAdapter):
             raise CollectionError("unsupported", "codex app-server socket not present")
 
         try:
-            result = self._rpc_call(
+            result = _rpc_call(
                 socket_path, HANDSHAKE_REQUEST, config.codex_timeout_seconds
             )
         except _HandshakeError as exc:
             raise exc.error
 
         windows = parse_codex_rate_limits(result)
-        notes: dict[str, Any] = {"view": "keyed"}
-        if not any("ByLimitId" in str(k) for k in []):  # placeholder, replaced below
-            pass
+        notes: dict[str, Any] = {"view": "single"}
         if isinstance(result, dict) and isinstance(result.get("rateLimitsByLimitId"), dict):
             notes["view"] = "keyed"
         elif isinstance(result, dict) and isinstance(result.get("rateLimits"), dict):
