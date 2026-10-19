@@ -58,6 +58,10 @@ When only reset time and duration are reported, the service SHALL estimate the s
 - **WHEN** a window reports a plausible reset time and duration but no explicit start
 - **THEN** its pace uses the inferred start and is marked `estimated`
 
+#### Scenario: Reset time that tracks the clock
+- **WHEN** consecutive snapshots of the same window show its reported reset time advancing with the clock — by far less than a whole window, rather than staying fixed or jumping by a full window
+- **THEN** pace is `unknown`, because such a report names no fixed boundary and the inferred start would always be the current time, leaving the elapsed fraction permanently zero
+
 #### Scenario: Availability without usage
 - **WHEN** a source reports only a 100% model availability indicator
 - **THEN** pace is `unknown` and the indicator is not treated as 100% quota remaining

@@ -301,6 +301,96 @@ class TestReportedPace:
         assert p["basis"] == "estimated"
 
 
+class TestUnstableBoundary:
+    """A window end that advances with the clock is not a fixed boundary.
+
+    Observed live on 2026-10-19: after the Codex 5h window reset, the app-server
+    reported ``resetsAt`` as ``now + 5h`` on every poll (advancing ~61s per 60s
+    poll) until something consumed the new window. The inferred start is then
+    always ``now``, so the elapsed fraction is permanently zero and a confident
+    label would be fabricated. The spec requires ``unknown``.
+    """
+
+    # NOW is 12:00; a 5h window ending at 15:00 gives start 10:00 and a 40%
+    # elapsed fraction, so the baseline is a real classification.
+    END = "2026-10-19T15:00:00Z"
+
+    def _window(self, **overrides):
+        base = {
+            "used_percent": 25.0,
+            "duration_minutes": 300,
+            "resets_at": self.END,
+            "resets_in_seconds": None,
+        }
+        base.update(overrides)
+        return _window(**base)
+
+    def _history_with_end(self, end: str) -> list[dict]:
+        return [{"collected_at": "2026-10-19T11:59:00Z", "used_percent": 24.0, "resets_at": end}]
+
+    def test_baseline_is_classified(self):
+        pace = compute_pace(self._window(), now_iso=NOW)
+        assert pace["classification"] == "under"
+        assert pace["expectedUsedPercent"] == 40.0
+
+    def test_a_boundary_tracking_the_poll_interval_is_unknown(self):
+        # The end moved forward by one poll interval, not by a window.
+        pace = compute_pace(
+            self._window(), now_iso=NOW,
+            history=self._history_with_end("2026-10-19T14:59:00Z"),
+        )
+        assert pace == unknown_pace()
+
+    def test_a_real_reset_keeps_its_classification(self):
+        # The end jumped by a full window: that is a reset, not drift.
+        pace = compute_pace(
+            self._window(), now_iso=NOW,
+            history=self._history_with_end("2026-10-19T10:00:00Z"),
+        )
+        assert pace["classification"] == "under"
+
+    def test_an_unchanged_boundary_keeps_its_classification(self):
+        pace = compute_pace(
+            self._window(), now_iso=NOW, history=self._history_with_end(self.END)
+        )
+        assert pace["classification"] == "under"
+
+    def test_jitter_below_the_slop_keeps_its_classification(self):
+        pace = compute_pace(
+            self._window(), now_iso=NOW,
+            history=self._history_with_end("2026-10-19T14:59:55Z"),
+        )
+        assert pace["classification"] == "under"
+
+    def test_a_backwards_correction_keeps_its_classification(self):
+        pace = compute_pace(
+            self._window(), now_iso=NOW,
+            history=self._history_with_end("2026-10-19T15:00:30Z"),
+        )
+        assert pace["classification"] == "under"
+
+    def test_history_without_a_boundary_is_ignored(self):
+        history = [{"collected_at": "2026-10-19T11:59:00Z", "used_percent": 24.0}]
+        pace = compute_pace(self._window(), now_iso=NOW, history=history)
+        assert pace["classification"] == "under"
+
+    def test_a_relative_reset_is_never_treated_as_drift(self):
+        """``resetsInSeconds`` states the remaining time, so it is exact.
+
+        The history end is 60s earlier than the end derived from
+        ``resetsInSeconds``, which would trip the drift check if it were applied
+        to relative resets. It must not be: the remaining time is stated
+        directly, so the elapsed fraction is exact regardless of wall-clock.
+        """
+        window = self._window(resets_at=None, resets_in_seconds=10800)
+        pace = compute_pace(
+            window, now_iso=NOW,
+            history=self._history_with_end("2026-10-19T14:59:00Z"),
+        )
+        assert pace["classification"] == "under"
+        assert pace["expectedUsedPercent"] == 40.0
+
+
 class TestTolerance:
     # All tolerance tests use a 24 h window that is 50% elapsed (resets in
     # 12 h) so the elapsed-window expectation is 50.

@@ -169,6 +169,9 @@ def compute_pace(
     """
     settings = settings or PaceSettings()
     now = _parse_iso(now_iso) or datetime.now(timezone.utc)
+    # Materialized once: it is consulted for boundary stability and for the
+    # reported-evidence gate, and the caller may hand over any iterable.
+    history = list(history) if history else []
 
     used_value = _as_float(_get(window, "usedPercent", "used_percent"))
 
@@ -185,8 +188,13 @@ def compute_pace(
     # otherwise preferred over the absolute ``resetsAt``.
     resets_in_seconds = _as_float(_get(window, "resetsInSeconds", "resets_in_seconds"))
     duration_minutes = _get(window, "durationMinutes", "duration_minutes")
+    absolute_end = (
+        None
+        if resets_in_seconds is not None
+        else _parse_iso(_get(window, "resetsAt", "resets_at"))
+    )
     start, end = _window_bounds(
-        reset_at=None if resets_in_seconds is not None else _parse_iso(_get(window, "resetsAt", "resets_at")),
+        reset_at=absolute_end,
         reset_in_seconds=resets_in_seconds,
         duration_minutes=duration_minutes,
         now=now,
@@ -197,6 +205,18 @@ def compute_pace(
     # ``_window_bounds`` guarantees a strictly positive duration, so
     # ``total`` is always > 0 here.
     total = (end - start).total_seconds()
+
+    # Only an absolute end can drift. A relative ``resetsInSeconds`` states the
+    # remaining time itself, so its derived end tracks the clock by
+    # construction while the elapsed fraction stays exact — checking it would
+    # reject every such window.
+    if absolute_end is not None and not _boundary_is_stable(end, total, history):
+        # An end that moves with the clock names no fixed boundary: the
+        # inferred start is always ``now``, so the elapsed fraction would be
+        # permanently zero and any label derived from it would be fabricated.
+        # The spec requires ``unknown`` when reset timing is implausible.
+        return unknown_pace()
+
     elapsed_fraction = _clamp01((now - start).total_seconds() / total)
     expected = _clamp_percent(elapsed_fraction * 100.0)
     classification = _classify(expected, used_value, settings.tolerance_percent)
@@ -205,7 +225,7 @@ def compute_pace(
     # real, recent movement exists; otherwise the reading is an ``estimated``
     # elapsed-window fraction.
     basis = "estimated"
-    if history and _reported_evidence(window, now, settings, list(history)):
+    if history and _reported_evidence(window, now, settings, history):
         basis = "reported"
 
     return {
@@ -213,6 +233,53 @@ def compute_pace(
         "basis": basis,
         "expectedUsedPercent": round(expected, 2),
     }
+
+
+#: Relative reset offsets (``resetsInSeconds``) are live by definition, so this
+#: check only applies to an absolute ``resetsAt``.
+
+#: A reported end may jitter by a few seconds between polls without meaning
+#: anything. Below this, the drift is noise.
+BOUNDARY_DRIFT_SLOP_SECONDS = 10.0
+
+#: An end that advances by *less* than this fraction of the window is tracking
+#: the clock; an end that jumps by a full window is a legitimate reset. The
+#: bound sits between the two, with room for a provider whose window is shorter
+#: than the polling cadence.
+BOUNDARY_DRIFT_RATIO = 0.5
+
+
+def _boundary_is_stable(
+    end: datetime,
+    duration_seconds: float,
+    history: list[dict[str, Any]],
+) -> bool:
+    """Whether the reported window end names a fixed boundary.
+
+    A provider that reports a provisional window end as ``now + duration`` —
+    a window that has not really started because nothing has consumed it yet —
+    produces an end that advances with the clock. Its inferred start is then
+    always ``now``, the elapsed fraction is permanently zero, and any label
+    derived from it would be fabricated. Such timing is implausible, so the
+    spec requires ``unknown``.
+
+    A fixed bound that simply resets advances by about a full window, which is
+    well clear of the drift band, so a real reset keeps its classification.
+    """
+    for row in history:
+        prior_end = _parse_iso(row.get("resets_at") or row.get("resetsAt"))
+        if prior_end is None:
+            continue
+        drift = (end - prior_end).total_seconds()
+        if drift <= 0:
+            # Unchanged, or the provider corrected the end *backwards*.
+            continue
+        if drift < BOUNDARY_DRIFT_SLOP_SECONDS:
+            # Jitter, not drift.
+            continue
+        if drift < duration_seconds * BOUNDARY_DRIFT_RATIO:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------

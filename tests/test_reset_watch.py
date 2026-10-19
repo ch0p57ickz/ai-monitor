@@ -103,6 +103,50 @@ class TestFindWindow:
         assert watch.find_window({"observations": []}, "primary") is None
 
 
+class TestIsDrifting:
+    """A boundary that tracks the clock is not a fixed one."""
+
+    def test_an_advance_of_one_poll_interval_is_drift(self, watch):
+        previous = _window(resetsAt="2026-10-19T19:37:35Z")
+        current = _window(resetsAt="2026-10-19T19:38:36Z")
+        assert watch.is_drifting(previous, current) is True
+
+    def test_a_full_window_advance_is_a_reset_not_drift(self, watch):
+        previous = _window(resetsAt="2026-10-19T19:37:35Z")
+        current = _window(
+            resetsAt="2026-10-20T00:37:35Z", usedPercent=0.0
+        )
+        assert watch.is_drifting(previous, current) is False
+
+    def test_an_unchanged_boundary_is_not_drift(self, watch):
+        assert watch.is_drifting(_window(), _window()) is False
+
+    def test_jitter_below_the_slop_is_not_drift(self, watch):
+        previous = _window(resetsAt="2026-10-19T19:37:35Z")
+        current = _window(resetsAt="2026-10-19T19:37:40Z")
+        assert watch.is_drifting(previous, current) is False
+
+    def test_a_backwards_correction_is_not_drift(self, watch):
+        previous = _window(resetsAt="2026-10-19T19:37:35Z")
+        current = _window(resetsAt="2026-10-19T19:37:30Z")
+        assert watch.is_drifting(previous, current) is False
+
+    def test_missing_samples_are_not_drift(self, watch):
+        assert watch.is_drifting(None, _window()) is False
+        assert watch.is_drifting(_window(), None) is False
+
+    def test_a_missing_duration_falls_back_to_the_previous_sample(self, watch):
+        """One sample missing a duration must not lose the classification."""
+        previous = _window(resetsAt="2026-10-19T19:37:35Z", durationMinutes=None)
+        current = _window(resetsAt="2026-10-19T19:38:36Z")
+        assert watch.is_drifting(previous, current) is True
+
+    def test_no_duration_on_either_side_is_not_drift(self, watch):
+        previous = _window(resetsAt="2026-10-19T19:37:35Z", durationMinutes=None)
+        current = _window(resetsAt="2026-10-19T19:38:36Z", durationMinutes=None)
+        assert watch.is_drifting(previous, current) is False
+
+
 class TestParseIso:
     def test_trailing_z_is_utc(self, watch):
         parsed = watch.parse_iso("2026-10-19T19:37:34Z")

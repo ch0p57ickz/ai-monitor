@@ -581,7 +581,14 @@ class UsageWorker:
                 if not wid or used is None:
                     continue
                 history.setdefault(wid, []).append(
-                    {"collected_at": row.get("collectedAt"), "used_percent": used}
+                    {
+                        "collected_at": row.get("collectedAt"),
+                        "used_percent": used,
+                        # The boundary matters too: a window end that advances
+                        # with the clock is not a fixed boundary, and pace has
+                        # to see that to refuse a fabricated expectation.
+                        "resets_at": w.get("resetsAt"),
+                    }
                 )
         return history
 
