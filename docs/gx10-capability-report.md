@@ -316,7 +316,7 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
 | Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync`, `hermes`, `openclaw-gx10` — all `tag:agent`, owned by the `tagged-devices` identity rather than the operator |
 | Node ownership | User-owned, untagged (`tailscale status --json` shows no `Tags`, no advertised services) |
-| Service alternative | Not available without re-tagging `zoey`, which changes how the node authenticates and drops the `Tailscale-User-Login` header that Serve injects for user devices only |
+| Service alternative | Viable and lower blast radius: Service access needs an explicit `svc:` grant, so the allow-all node policy is untouched. Requires tagging `zoey` (a Service host must be tag-based) and advertising the Service from `zoey` itself |
 | Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
 
 ### Finding: the policy is allow-all, and its effect is observable
@@ -352,10 +352,17 @@ Two consequences:
    back to covering `443`.
 
 The device-level check still needs a device: from a `tag:agent` node, `443` should
-time out while `8443` still answers. A Service would avoid all of this, but a
-Service host must be tagged, and tagging `zoey` drops the `Tailscale-User-Login`
-header that Serve injects for user devices only — on a host that already serves
-four routes.
+time out while `8443` still answers.
+
+A Service avoids the port-exclusion collateral altogether, because Service access
+is granted by a named `svc:` rule rather than by the node rules. The cost is that a
+Service host must be tag-based, so `zoey` has to be tagged, and the Service has to
+be advertised from `zoey` since the API binds loopback only. Checked against the
+docs rather than assumed: identity headers are filled from the *requester's*
+identity, so tagging the host does not strip them from the four existing routes;
+`RunSSH: false` on `zoey`, so no Tailscale SSH session is at risk; but
+`autogroup:self` and user-based selectors stop matching a tagged `zoey`, and
+tagging re-registers the node. The runbook has the ordered steps.
 
 ## Verification results (local, 2026-10-19)
 

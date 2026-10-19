@@ -599,18 +599,89 @@ A denied connection is dropped rather than refused, so expect a timeout rather
 than a connection error. Re-running `tailscale debug netmap` on a disallowed node
 is the second half of the check: its filter should no longer list `zoey:443`.
 
-#### Why a Service is not the answer here
+#### Alternative: publish the API as a Tailscale Service
 
-A Service is the cleaner tool for exactly this, and this tailnet already uses that
-precedent — the agent dashboards moved to Tailscale **Services** because a device
-route on `ranger` stayed reachable by anyone the device rules already allowed. It
-does not transfer to `zoey`:
+A Service is the cleaner mechanism for this restriction, and it avoids the global
+port exclusion above entirely. Service access is granted explicitly — a
+`dst: ["svc:<name>"]` rule — so the denial is a positive statement rather than an
+allow-all that has to be dismantled. Tailscale's wording is that users and devices
+"must explicitly be granted access to a service via Grants". The `*` wildcard
+expands to *device* addresses and approved subnet routes, not to a Service's
+TailVIP, so the default allow-all policy does not reach a Service and no other
+node's rules are affected.
 
-- The spec requires Serve, not a Service.
-- A Service host must be a tagged device. `zoey` is user-owned and untagged
-  (`tailscale status --json` shows no `Tags`), and tagging it would drop the
-  `Tailscale-User-Login` header that Serve injects for user devices only.
-  Re-tagging a host that already serves four routes is not a small change.
+The cost is one requirement, stated as a warning in the Services documentation:
+**a Service host must use a tag-based identity.** A device authenticated with a
+user account cannot host a Service. `zoey` is user-owned and untagged, so it has to
+be tagged, and the Service has to be advertised from `zoey` itself, because the API
+binds `127.0.0.1` and no other host can reach it to proxy for it.
+
+What tagging `zoey` does and does not change, checked against the documentation
+rather than assumed:
+
+- **Identity headers are unaffected.** Serve fills `Tailscale-User-Login` from the
+  *requester's* identity; the docs say only that these headers are not populated
+  for traffic *originating from* tagged devices. Requests from the Mac and iPhone
+  still arrive with a login name, so `zoey`'s four existing routes keep the
+  identity behaviour they have today.
+- **Tailscale SSH is unaffected here.** `tailscale debug prefs` reports
+  `RunSSH: false` on `zoey`, so there is no Tailscale SSH session to lose.
+- **`autogroup:self` stops matching `zoey`.** A tagged device is not "a user's
+  device", so `dst: ["autogroup:self"]` and `dst: ["papaya.ch0mp@gmail.com"]` no
+  longer cover it. Nothing breaks under today's allow-all policy; a later
+  narrowing of the device rules has to name the tag instead.
+- **Tagging re-registers the node.** The DNS name, IP, and the four Serve routes
+  persist, but the node is re-authenticated as the tag. Do this with LAN or console
+  access to `zoey` in hand rather than only over the tailnet, in case the session
+  drops before re-authentication completes.
+
+The steps, in order:
+
+```sh
+# 1. Define the tag in the policy file so you can apply it:
+#    "tagOwners": { "tag:zoey": ["autogroup:member"] }
+
+# 2. Tag the host. Expect a re-authentication prompt.
+sudo tailscale set --advertise-tags=tag:zoey
+tailscale status --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["Tags"])'
+
+# 3. Define the Service in the admin console (Services page): name it and give it
+#    the endpoint tcp:443. This needs Owner, Admin, or Network admin.
+
+# 4. Advertise it from zoey, then approve the host in the console — or add an
+#    autoApprovers.services rule to pre-approve it.
+sudo tailscale serve --service=svc:ai-monitor --https=443 127.0.0.1:8732
+tailscale serve status
+
+# 5. Grant access. This one rule is the whole access control story:
+#    {"grants": [{"src": ["papaya.ch0mp@gmail.com"],
+#                 "dst": ["svc:ai-monitor"], "ip": ["443"]}]}
+```
+
+The URL becomes `https://ai-monitor.tail831c33.ts.net/` — the Service's MagicDNS
+name, not `zoey`'s. Services are TCP-only, which HTTPS satisfies, and a layer 7
+endpoint (`--https`) is the kind that carries identity headers; a layer 3 endpoint
+(`--tun`) does not. Clients on v1.94 and later need no extra configuration, so the
+Mac and iPhone qualify without `--accept-routes`.
+
+A Service is also a valid `accept` or `deny` destination in the policy `tests`
+block, so the denial is asserted the same way as in the node-route form:
+
+```json
+{"src": "tag:agent", "deny": ["svc:ai-monitor:443"]}
+```
+
+**Spec note.** Task 5.3 asks to "publish the local port through Tailscale Serve over
+HTTPS and restrict access through tailnet identity and device rules". A Service is
+advertised *with* `tailscale serve` and restricted by a grant, so it meets the
+intent, and it satisfies the denied-device scenario without the collateral of the
+node-route form. The wording should name the Service explicitly so the acceptance
+criteria and the implementation agree.
+
+The agent dashboards are reported to run as Services for the same reason. That
+cannot be confirmed from `zoey`: `tailscale debug netmap` reports
+`CollectServices: false`, so this node does not collect Service information.
 
 ### Acceptance checks (operator present)
 
