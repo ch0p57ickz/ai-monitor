@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from typing import Any
@@ -87,8 +88,9 @@ def main() -> int:
         return 2
 
     secret = management or inference
+    workdir = tempfile.mkdtemp(prefix="ai-monitor-openrouter-check-")
     config = Config(
-        data_dir=tempfile.mkdtemp(prefix="ai-monitor-openrouter-check-"),
+        data_dir=workdir,
         openrouter_api_key=inference,
         openrouter_management_key=management,
         openrouter_timeout_seconds=20,
@@ -100,45 +102,48 @@ def main() -> int:
     outcomes: dict[str, dict[str, Any]] = {}
     any_leak = False
 
-    for source_id in STREAMS:
-        adapter = registry[source_id]()
-        record: dict[str, Any] = {"source": source_id}
-        try:
-            raw = adapter.fetch(config)
-        except CollectionError as exc:
-            record["status"] = "failed"
-            record["errorCategory"] = exc.category
-            record["error"] = _redact(str(exc), secret)
-        except Exception as exc:  # noqa: BLE001
-            record["status"] = "failed"
-            record["errorCategory"] = "unexpected"
-            record["error"] = _redact(str(exc), secret)
-        else:
-            source = get_source_def(source_id)
-            raw = enrich_observation(source, raw, PaceSettings(), {}, None, {})
-            observation = normalize_observation(source, raw)
-            serialized = observation.to_dict()
-            record["status"] = raw.get("status")
-            record["budgets"] = [
-                {
-                    "scope": window.scope,
-                    "totalCreditsUsd": window.total_credits_usd,
-                    "totalUsageUsd": window.total_usage_usd,
-                    "remainingUsd": window.remaining_usd,
-                    "limitUsd": window.limit_usd,
-                    "usedUsd": window.used_usd,
-                    "resetsAt": window.resets_at,
-                    "pace": window.pace,
-                }
-                for window in observation.budgets
-            ]
-            # A secret must never reach a stored or returned payload.
-            if leaked(secret, serialized, raw):
-                any_leak = True
-                record["leakedSecret"] = True
-        finally:
-            adapter.close()  # nothing to release today, but keep the contract
-        outcomes[source_id] = record
+    try:
+        for source_id in STREAMS:
+            adapter = registry[source_id]()
+            record: dict[str, Any] = {"source": source_id}
+            try:
+                raw = adapter.fetch(config)
+            except CollectionError as exc:
+                record["status"] = "failed"
+                record["errorCategory"] = exc.category
+                record["error"] = _redact(str(exc), secret)
+            except Exception as exc:  # noqa: BLE001
+                record["status"] = "failed"
+                record["errorCategory"] = "unexpected"
+                record["error"] = _redact(str(exc), secret)
+            else:
+                source = get_source_def(source_id)
+                raw = enrich_observation(source, raw, PaceSettings(), {}, None, {})
+                observation = normalize_observation(source, raw)
+                serialized = observation.to_dict()
+                record["status"] = raw.get("status")
+                record["budgets"] = [
+                    {
+                        "scope": window.scope,
+                        "totalCreditsUsd": window.total_credits_usd,
+                        "totalUsageUsd": window.total_usage_usd,
+                        "remainingUsd": window.remaining_usd,
+                        "limitUsd": window.limit_usd,
+                        "usedUsd": window.used_usd,
+                        "resetsAt": window.resets_at,
+                        "pace": window.pace,
+                    }
+                    for window in observation.budgets
+                ]
+                # A secret must never reach a stored or returned payload.
+                if leaked(secret, serialized, raw):
+                    any_leak = True
+                    record["leakedSecret"] = True
+            finally:
+                adapter.close()  # nothing to release today, but keep the contract
+            outcomes[source_id] = record
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
     ok = [sid for sid, rec in outcomes.items() if rec["status"] == "success"]
     failed = [sid for sid, rec in outcomes.items() if rec["status"] != "success"]

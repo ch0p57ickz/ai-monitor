@@ -374,6 +374,35 @@ class TestUnstableBoundary:
         pace = compute_pace(self._window(), now_iso=NOW, history=history)
         assert pace["classification"] == "under"
 
+    def test_a_settled_boundary_after_a_drifting_stretch_is_stable(self):
+        """A window that locked its boundary must regain its classification.
+
+        Regression: comparing against every retained row kept a window at
+        ``unknown`` long after it settled, because an older drifting row was
+        still inside the drift band.
+        """
+        history = [
+            # Newest first, as ``_window_history`` supplies them: the boundary
+            # has now settled at the same instant.
+            {"collected_at": "2026-10-19T11:59:00Z", "used_percent": 30.0,
+             "resets_at": self.END},
+            # An older row from before it settled, which drifted.
+            {"collected_at": "2026-10-19T11:58:00Z", "used_percent": 28.0,
+             "resets_at": "2026-10-19T14:59:00Z"},
+        ]
+        pace = compute_pace(self._window(used_percent=30.0), now_iso=NOW, history=history)
+        assert pace["classification"] != "unknown"
+
+    def test_the_most_recent_boundary_decides_regardless_of_row_order(self):
+        history = [
+            {"collected_at": "2026-10-19T11:58:00Z", "used_percent": 28.0,
+             "resets_at": "2026-10-19T14:59:00Z"},
+            {"collected_at": "2026-10-19T11:59:00Z", "used_percent": 30.0,
+             "resets_at": self.END},
+        ]
+        pace = compute_pace(self._window(used_percent=30.0), now_iso=NOW, history=history)
+        assert pace["classification"] != "unknown"
+
     def test_a_relative_reset_is_never_treated_as_drift(self):
         """``resetsInSeconds`` states the remaining time, so it is exact.
 

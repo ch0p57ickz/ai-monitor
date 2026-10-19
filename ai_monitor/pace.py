@@ -265,21 +265,31 @@ def _boundary_is_stable(
 
     A fixed bound that simply resets advances by about a full window, which is
     well clear of the drift band, so a real reset keeps its classification.
+
+    Only the *most recent* prior snapshot is compared, because the rule is about
+    consecutive snapshots. Comparing every retained row would keep a window
+    marked unstable long after it settled: once the provider locks the boundary
+    at a fixed instant, an earlier drifting row is still inside the drift band
+    and would hold the window at ``unknown`` until that row aged out of history.
     """
+    prior_end: Optional[datetime] = None
+    prior_collected: Optional[datetime] = None
     for row in history:
-        prior_end = _parse_iso(row.get("resets_at") or row.get("resetsAt"))
-        if prior_end is None:
+        collected = _parse_iso(row.get("collected_at") or row.get("collectedAt"))
+        candidate = _parse_iso(row.get("resets_at") or row.get("resetsAt"))
+        if collected is None or candidate is None:
             continue
-        drift = (end - prior_end).total_seconds()
-        if drift <= 0:
-            # Unchanged, or the provider corrected the end *backwards*.
-            continue
-        if drift < BOUNDARY_DRIFT_SLOP_SECONDS:
-            # Jitter, not drift.
-            continue
-        if drift < duration_seconds * BOUNDARY_DRIFT_RATIO:
-            return False
-    return True
+        if prior_collected is None or collected > prior_collected:
+            prior_end, prior_collected = candidate, collected
+
+    if prior_end is None:
+        return True
+
+    drift = (end - prior_end).total_seconds()
+    if drift < BOUNDARY_DRIFT_SLOP_SECONDS:
+        # Unchanged, corrected backwards, or jitter rather than drift.
+        return True
+    return not (drift < duration_seconds * BOUNDARY_DRIFT_RATIO)
 
 
 # ---------------------------------------------------------------------------
