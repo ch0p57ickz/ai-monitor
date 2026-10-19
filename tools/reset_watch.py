@@ -184,12 +184,25 @@ def analyze(
     """Apply the sample rules. Returns ``(failures, resets, drifting)``.
 
     Kept pure so the same rules run against a recorded log, which is what makes
-    the guard falsifiable offline.
+    the guard falsifiable offline. That includes the guards against judging
+    nothing: a log with too few samples, or with no window in any of them, would
+    otherwise sail through every per-sample rule and report success — turning
+    the guard's own proof into a vacuous pass.
     """
     failures: list[str] = []
     resets: list[dict[str, Any]] = []
     previous: Optional[dict[str, Any]] = None
     drifting = 0
+
+    if len(samples) < 2:
+        failures.append(
+            f"not enough samples to judge anything: {len(samples)} recorded"
+        )
+    elif not any(window for _, window in samples):
+        failures.append(
+            "no window was observed in any sample: nothing to judge "
+            "(a log recorded while the API was failing looks like this)"
+        )
 
     for at, window in samples:
         if not window:
@@ -237,7 +250,11 @@ def analyze(
 
 
 def read_log(path: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
-    """Read a recorded JSON Lines log into ``(at, window)`` samples."""
+    """Read a recorded JSON Lines log into ``(at, window)`` samples.
+
+    Blank and malformed lines are skipped, as are lines whose JSON is valid but
+    not an object, so a truncated log can still be replayed.
+    """
     samples: list[tuple[str, Optional[dict[str, Any]]]] = []
     with open(path, encoding="utf-8") as handle:
         for line in handle:
@@ -247,6 +264,8 @@ def read_log(path: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
                 continue
             samples.append((record.get("at", "?"), record.get("window")))
     return samples
@@ -266,6 +285,11 @@ def _report(
     )
     for entry in resets:
         print(f"  reset at {entry['at']}: {entry['reason']}")
+    if len(resets) >= 3:
+        print(
+            f"note: {len(resets)} turnovers were counted; a convergence rollover "
+            f"of the same window can look like several resets"
+        )
     if history_lengths:
         print(f"history lengths seen: {sorted(set(history_lengths))}")
 
@@ -330,6 +354,7 @@ def main() -> int:
     samples: list[tuple[str, Optional[dict[str, Any]]]] = []
     history_lengths: list[int] = []
     status_failures: list[str] = []
+    last_window: Optional[dict[str, Any]] = None
 
     print(f"watching codex '{args.suffix}' for {args.minutes:.0f} min on {base}")
     print(f"recording samples to {args.log}")
@@ -349,6 +374,13 @@ def main() -> int:
 
                 window = find_window(usage, args.suffix) if status == 200 else None
                 at = _now()
+                # Live feedback only: the verdict comes from ``analyze`` below,
+                # but a detached 50-minute soak needs to show progress. Uses the
+                # same ``detect_reset`` the analysis uses, so the two agree.
+                reason = detect_reset(last_window, window)
+                if reason:
+                    print(f"RESET detected at {at}: {reason}")
+                last_window = window
                 samples.append((at, window))
                 log.write(json.dumps({"at": at, "sample": len(samples) - 1, "window": window}) + "\n")
                 log.flush()
@@ -366,8 +398,6 @@ def main() -> int:
         samples, suffix=args.suffix, require_reset=args.require_reset
     )
     failures = list(status_failures) + failures
-    if len(samples) < 2:
-        failures.append("not enough samples to judge anything")
     over = [length for length in history_lengths if length > 5]
     if over:
         failures.append(f"history returned more than the requested limit: {over}")

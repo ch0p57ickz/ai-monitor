@@ -148,7 +148,10 @@ def main() -> int:
     ok = [sid for sid, rec in outcomes.items() if rec["status"] == "success"]
     failed = [sid for sid, rec in outcomes.items() if rec["status"] != "success"]
 
-    print(json.dumps({"streams": outcomes}, indent=2, sort_keys=True))
+    # Redacted before printing: when ``leaked`` fires, the offending payload is
+    # exactly what must not reach stdout, and this dump happens before the FAIL
+    # line below.
+    print(json.dumps(_redact({"streams": outcomes}, secret), indent=2, sort_keys=True))
     print()
     print(f"collected: {ok or 'none'}")
     print(f"failed:    {failed or 'none'}")

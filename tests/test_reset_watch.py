@@ -181,19 +181,50 @@ class TestAnalyze:
         assert drifting == 1
         assert failures == []
 
+    def _steady_pair(self):
+        """Two snapshots of a fixed window: nothing happens, which is valid."""
+        first = _window(usedPercent=20.0, resetsAt="2026-10-19T15:00:00Z")
+        second = _window(usedPercent=21.0, resetsAt="2026-10-19T15:00:00Z")
+        return [
+            ("2026-10-19T13:59:07Z", first),
+            ("2026-10-19T14:00:07Z", second),
+        ]
+
     def test_a_missing_reset_fails_when_required(self, watch):
-        samples = [("2026-10-19T19:38:07Z", _window())]
         failures, _, _ = watch.analyze(
-            samples, suffix="primary", require_reset=True
+            self._steady_pair(), suffix="primary", require_reset=True
         )
         assert any("no reset was observed" in failure for failure in failures)
 
     def test_a_missing_reset_is_tolerated_when_not_required(self, watch):
-        samples = [("2026-10-19T19:38:07Z", _window())]
+        failures, _, _ = watch.analyze(
+            self._steady_pair(), suffix="primary", require_reset=False
+        )
+        assert failures == []
+
+    def test_an_empty_log_cannot_pass(self, watch):
+        """Guards against a vacuous pass: replaying nothing must fail."""
+        failures, _, _ = watch.analyze([], suffix="primary", require_reset=False)
+        assert any("not enough samples" in failure for failure in failures)
+
+    def test_a_single_sample_cannot_pass(self, watch):
+        failures, _, _ = watch.analyze(
+            [("2026-10-19T19:38:07Z", _window())],
+            suffix="primary",
+            require_reset=False,
+        )
+        assert any("not enough samples" in failure for failure in failures)
+
+    def test_a_log_with_no_window_anywhere_cannot_pass(self, watch):
+        """A log recorded while the API was failing looks exactly like this."""
+        samples = [
+            ("2026-10-19T19:38:07Z", None),
+            ("2026-10-19T19:39:07Z", None),
+        ]
         failures, _, _ = watch.analyze(
             samples, suffix="primary", require_reset=False
         )
-        assert failures == []
+        assert any("no window was observed" in failure for failure in failures)
 
     def test_a_reset_with_a_stale_expectation_fails(self, watch):
         """A pace left on the window that just ended reads ~100."""
@@ -234,6 +265,18 @@ class TestReadLog:
         assert [at for at, _ in samples] == ["t0", "t1"]
         assert samples[0][1] is None
         assert samples[1][1]["id"] == "codex:codex:primary"
+
+    def test_valid_json_that_is_not_an_object_is_skipped(self, watch, tmp_path):
+        """``json.loads`` accepts scalars; they are not samples."""
+        import json  # noqa: PLC0415
+
+        path = tmp_path / "log.jsonl"
+        path.write_text(
+            "123\nnull\n\"text\"\n[1, 2]\n"
+            + json.dumps({"at": "t0", "sample": 0, "window": None}) + "\n"
+        )
+        samples = watch.read_log(str(path))
+        assert [at for at, _ in samples] == ["t0"]
 
 
 class TestParseIso:
