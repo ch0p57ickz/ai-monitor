@@ -48,8 +48,9 @@ def _directive_values(text: str, directive: str) -> list[str]:
 
 
 def test_the_unit_exists(unit_text):
-    assert _directive_values(unit_text, "ExecStart"), "the unit needs ExecStart="
-    assert "--config" in unit_text.split("ExecStart=", 1)[1].splitlines()[0]
+    exec_lines = _directive_values(unit_text, "ExecStart")
+    assert exec_lines, "the unit needs ExecStart="
+    assert any("--config" in value for value in exec_lines)
 
 
 def test_state_directory_is_the_service_accounts_state(unit_text):
@@ -95,6 +96,9 @@ def test_the_unit_restarts_and_keeps_state(unit_text):
 
 
 def test_credentials_file_mode_matches_the_runbook(unit_text):
-    """The unit's comment, the report's table and the install step must agree."""
+    """The unit's comment and the install step must agree on the mode."""
     runbook = (UNIT.parent.parent / "docs" / "gx10-runbook.md").read_text("utf-8")
-    assert "0750" in runbook and "0640" in runbook
+    assert "install -m 0640 -o root -g ai-monitor" in runbook, (
+        "the unit comment promises a 0640 root:ai-monitor config file"
+    )
+    assert "0640 config file owned by root" in unit_text

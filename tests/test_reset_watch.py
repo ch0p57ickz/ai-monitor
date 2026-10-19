@@ -226,8 +226,29 @@ class TestAnalyze:
         )
         assert any("no judgeable window" in failure for failure in failures)
 
+    def test_a_pace_only_log_cannot_pass(self, watch):
+        """No rule reads pace without a reset time or a detected reset."""
+        samples = [
+            ("2026-10-19T19:38:07Z", {"id": "codex:codex:primary", "pace": {"classification": "unknown"}}),
+            ("2026-10-19T19:39:07Z", {"id": "codex:codex:primary", "pace": {"classification": "unknown"}}),
+        ]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert any("no judgeable window" in failure for failure in failures)
+
+    def test_a_malformed_pace_does_not_crash(self, watch):
+        samples = [
+            ("2026-10-19T19:38:07Z", _window(resetsAt="2026-10-20T01:00:00Z", pace="nope")),
+            ("2026-10-19T19:39:07Z", _window(resetsAt="2026-10-20T01:00:00Z", pace="nope")),
+        ]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert failures == []
+
     def test_a_window_with_no_signal_cannot_pass(self, watch):
-        """Window objects that hold no reset time or pace judge nothing."""
+        """Window objects that hold no reset time or use judge nothing."""
         samples = [
             ("2026-10-19T19:38:07Z", {"id": "codex:codex:primary"}),
             ("2026-10-19T19:39:07Z", {"id": "codex:codex:primary"}),

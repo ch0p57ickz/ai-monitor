@@ -64,7 +64,7 @@ def _redact(value: Any, secrets: Any) -> Any:
     """
     if isinstance(secrets, str):
         secrets = [secrets]
-    secrets = [secret for secret in secrets if secret]
+    secrets = [secret for secret in (secrets or []) if secret]
     if isinstance(value, str):
         for secret in secrets:
             value = value.replace(secret, "<redacted>")
@@ -163,10 +163,7 @@ def main() -> int:
     # Redacted before printing: when ``leaked`` fires, the offending payload is
     # exactly what must not reach stdout, and this dump happens before the FAIL
     # line below.
-    payload: Any = {"streams": outcomes}
-    for value in secrets:
-        payload = _redact(payload, value)
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(_redact({"streams": outcomes}, secrets), indent=2, sort_keys=True))
     print()
     print(f"collected: {ok or 'none'}")
     print(f"failed:    {failed or 'none'}")

@@ -117,12 +117,22 @@ def _is_judgeable(window: Any) -> bool:
     """Whether a sample carries anything the rules can act on.
 
     Guards against a vacuous pass: a log of window objects that hold no reset
-    time and no pace reading satisfies "a window was observed" while failing
-    every per-sample rule, so replay would report success.
+    time and no measured use satisfies "a window was observed" while failing
+    every per-sample rule, so replay would report success. Pace alone does not
+    count — no rule reads it without a reset time (drift) or a detected reset
+    (the post-reset expectation), so a pace-only log judges nothing.
     """
-    return isinstance(window, dict) and bool(
-        window.get("resetsAt") or window.get("pace")
+    if not isinstance(window, dict):
+        return False
+    return bool(window.get("resetsAt")) or isinstance(
+        window.get("usedPercent"), (int, float)
     )
+
+
+def _pace(window: dict[str, Any]) -> dict[str, Any]:
+    """The window's pace mapping, or an empty one when it is malformed."""
+    pace = window.get("pace")
+    return pace if isinstance(pace, dict) else {}
 
 
 def detect_reset(
@@ -214,7 +224,7 @@ def analyze(
         failures.append(
             "no judgeable window was observed in any sample: nothing to judge "
             "(a log recorded while the API was failing looks like this, and a "
-            "window needs a reset time or a pace reading to say anything)"
+            "window needs a reset time or a measured use to say anything)"
         )
 
     for at, window in samples:
@@ -227,7 +237,7 @@ def analyze(
             resets.append({"at": at, "reason": reason, "window": window})
         if is_drifting(previous, window):
             drifting += 1
-            pace = window.get("pace") or {}
+            pace = _pace(window)
             if pace.get("classification") != "unknown":
                 failures.append(
                     f"a drifting boundary at {at} was classified {json.dumps(pace)} "
@@ -241,7 +251,7 @@ def analyze(
         )
 
     for entry in resets:
-        pace = entry["window"].get("pace") or {}
+        pace = _pace(entry["window"])
         expected = pace.get("expectedUsedPercent")
         if pace.get("classification") == "unknown":
             # A provisional boundary right after a reset is the honest answer;

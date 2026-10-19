@@ -49,7 +49,7 @@ the `socket` transport instead reports the Codex source as
 `network`/`unavailable` until that restriction is lifted for the daemon. One
 deployment caveat applies to either transport: the service account needs a
 writable `$HOME` for `~/.codex` — see "the unit's sandbox would have starved the
-Codex child" under the verification results.
+Codex child" below.
 
 ## Antigravity
 
@@ -156,11 +156,11 @@ pending (tasks 5.2-5.4).
 
 ### Finding: the unit's sandbox would have starved the Codex child
 
-`deploy/ai-monitor.service` sets `ProtectSystem=strict`, which mounts the entire
-file system hierarchy read-only, `$HOME` included, while listing only
-`/var/lib/ai-monitor` as writable. The bundled Codex CLI keeps its credentials
-and state in `~/.codex`, so the stdio transport — the default — could not have
-collected on a deployed host.
+The first version of `deploy/ai-monitor.service` set `ProtectSystem=strict`,
+which mounts the entire file system hierarchy read-only, `$HOME` included, while
+listing only `/var/lib/ai-monitor` as writable. The bundled Codex CLI keeps its
+credentials and state in `~/.codex`, so the stdio transport — the default — could
+not have collected on a deployed host.
 
 Checked against the real CLI (2026-10-19):
 
