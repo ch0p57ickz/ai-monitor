@@ -87,16 +87,30 @@ across it:
 ```sh
 # Runs the real service with the real adapters, samples /api/v1/usage once a
 # minute, records every sample as JSON Lines, and checks what happened at the
-# reset. It must span at least one window reset to pass. Detach it if the watch
-# is longer than your session.
-python3 tools/reset_watch.py --minutes 50 --log /tmp/opencode/reset-watch.jsonl
+# reset. --require-reset makes the run fail unless a window turnover is spanned;
+# drop it for a short watch that only checks the drift rule. Detach it if the
+# watch is longer than your session.
+python3 tools/reset_watch.py --minutes 50 --require-reset --log /tmp/opencode/reset-watch.jsonl
 ```
 
 It asserts that a reset was observed, that the window id and duration survive
-it, that the first post-reset pace is usable and compares against a *small*
-expectation (a stale window start would push it to 100), and that history stayed
-bounded and the API never returned a non-200. The JSON Lines log is the raw
-evidence; results are recorded in `docs/gx10-capability-report.md`.
+it, that a window whose end drifts with the clock is reported as `unknown`
+rather than classified, and that history stayed bounded and the API never
+returned a non-200. Right after a reset, pace must be either `unknown` (a
+provisional boundary, the honest answer) or classified against a *small*
+expectation — never against the window that just ended, which would read ~100.
+
+The rules can be re-applied to a recorded log, which is how the drift guard
+demonstrates that it bites without waiting for another turnover:
+
+```sh
+# Replaying the pre-fix log fails, naming each fabricated label; replaying the
+# post-fix log passes.
+python3 tools/reset_watch.py --replay /tmp/opencode/reset-watch.jsonl --require-reset
+```
+
+The JSON Lines log is the raw evidence; results are recorded in
+`docs/gx10-capability-report.md`.
 
 ## Install (task 5.2, first time)
 
