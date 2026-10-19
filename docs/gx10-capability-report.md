@@ -27,7 +27,9 @@ persistent data directory).
 | --- | --- |
 | CLI | codex-cli 0.157.1 (`/usr/bin/codex`) |
 | App-server subcommand | `codex app-server` (experimental): `daemon`, `proxy`, `generate-ts`, `generate-json-schema`, `--listen stdio://`/`unix://`/`ws://` |
-| Control socket | `~/.codex/app-server-control/app-server-control.sock` exists while `codex app-server daemon` runs. On this host the managed daemon accepts then closes every connection, including `codex app-server proxy` (broken pipe); a directly started `codex app-server --listen stdio://` works. The daemon logs `Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces` |
+| Control socket | `~/.codex/app-server-control/app-server-control.sock` exists while `codex app-server daemon` runs, but on this host it accepts then closes every connection. The official `codex app-server proxy` fails identically (`failed to copy data from stdin to socket: Broken pipe`), so the daemon — not the client — is at fault. A directly started `codex app-server --listen stdio://` works |
+| Daemon root cause | `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu 24.04 default) blocks the user namespace that Codex's bubblewrap sandbox needs: `bwrap: setting up uid map: Permission denied`, and the daemon logs `Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces`. `kernel.unprivileged_userns_clone` is already `1`, so the AppArmor restriction is the blocker, not the userns sysctl |
+| Daemon fix (needs root) | Either grant the binary a user-namespace AppArmor profile (targeted), or relax the restriction system-wide with `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (weakens host hardening). Neither was applied here: both require privileged approval |
 | Auth state | `~/.codex/auth.json` present (contents not read, not reported) |
 | Protocol | Confirmed from `codex app-server generate-json-schema` and a live session: the connection must send `initialize` first (any other request is answered with a closed connection), then `account/rateLimits/read` (`Account/rateLimits/readRequest`, response `GetAccountRateLimitsResponse`). Server notifications (`configWarning`, `account/updated`) arrive between replies and must be skipped |
 | Rate-limit fields | `rateLimitsByLimitId` (keyed) with a `rateLimits` single-view mirror; each snapshot has `primary`/`secondary` `RateLimitWindow` objects carrying `usedPercent` (integer), `windowDurationMins`, and `resetsAt` (Unix seconds). `accountId` is defined but was absent in the live payload |
@@ -39,10 +41,12 @@ secondary` at 23% used against `expectedUsedPercent` 27.03 → `at`;
 `accountId` was null in the live payload. Percentages move with use; the
 classification and the presence of real reset bounds are the point.
 
-Verdict: capable. The adapter protocol is verified against the live app-server;
-on this host it must be reached through a working app-server transport because
-the managed daemon socket is unhealthy (the GX10 install step should confirm
-`codex app-server daemon start` produces a usable socket).
+Verdict: capable. The adapter protocol is verified against the live app-server.
+Two prerequisites remain before the service can collect Codex usage on this
+host: the AppArmor user-namespace restriction must be lifted for the codex
+binary (root), and `codex app-server daemon start` must then be confirmed to
+produce a socket that answers. Until both hold, the service reports the Codex
+source as `network`/`unavailable`.
 
 ## Antigravity
 

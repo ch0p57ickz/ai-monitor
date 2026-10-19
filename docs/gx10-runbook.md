@@ -78,6 +78,14 @@ sudo -u ai-monitor ls -l /home/ai-monitor/.codex/app-server-control/
 # be used to verify the adapter:
 python3 tools/codex_live_check.py
 
+# On Ubuntu 24.04 the usual cause is the AppArmor user-namespace restriction:
+#   sysctl kernel.apparmor_restrict_unprivileged_userns   -> 1
+#   bwrap --ro-bind / / --dev /dev true   -> "setting up uid map: Permission denied"
+# Fix it by granting the codex binary a user-namespace AppArmor profile, or, to
+# relax it system-wide (weakens host hardening):
+#   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+# Then restart the daemon and re-check the socket before continuing.
+
 # Antigravity: the installed variant on this host has no usage subcommand, so
 # `antigravity` is expected to report `unavailable` (see the capability report).
 ```
