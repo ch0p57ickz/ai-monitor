@@ -206,11 +206,14 @@ Build a wheel where setuptools is available, then install the wheel. Installing 
 wheel builds nothing, so the service host needs neither setuptools nor an index:
 
 ```sh
-# On a host with setuptools, or with network access:
-python3 -m pip wheel --no-build-isolation -w dist/ /opt/ai-monitor
+# Build the wheel somewhere that has setuptools. --no-build-isolation uses that
+# interpreter's setuptools rather than downloading one, so it works offline; on a
+# host with network access you can omit the flag instead. Write the wheel outside
+# the checkout, or `dist/` appears as an untracked directory in /opt/ai-monitor.
+python3 -m pip wheel --no-build-isolation -w /tmp/ai-monitor-wheel /opt/ai-monitor
 
-# On the service host, into its clean venv:
-sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-index /path/to/ai_monitor-*.whl
+# Copy it to the service host, then install into the clean venv:
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-index /tmp/ai-monitor-wheel/ai_monitor-*.whl
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 ```
 

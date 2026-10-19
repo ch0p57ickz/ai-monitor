@@ -421,7 +421,7 @@ install from a copy of the checkout, and run the console script the unit runs.
 
 | Step | Result |
 | --- | --- |
-| `pip install <checkout>` (setuptools obtainable from an index or cache) | Pass — builds a wheel and installs `ai-monitor` 0.1.0 |
+| `pip install <checkout>` (index reachable) | Pass — builds a wheel and installs `ai-monitor` 0.1.0 |
 | `ai-monitor --version` | Pass — `ai-monitor 0.1.0` |
 | Service from the installed script | Pass — serves `/api/v1/version` and `/health`, shuts down cleanly on SIGTERM |
 | Upgrade (package as 0.2.0, reinstall) | Pass — all three version sources report 0.2.0 |

@@ -12,6 +12,8 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 
+import pytest
+
 import ai_monitor
 
 
@@ -50,7 +52,10 @@ class TestResolveVersion:
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
         monkeypatch.setattr(metadata, "version", corrupt)
-        assert ai_monitor._resolve_version() == ai_monitor.SOURCE_VERSION
+        # Failing softly is not the same as failing silently: a deployed install
+        # that cannot read its metadata must be distinguishable from a checkout.
+        with pytest.warns(RuntimeWarning):
+            assert ai_monitor._resolve_version() == ai_monitor.SOURCE_VERSION
 
     def test_metadata_without_a_version_falls_back(self, monkeypatch):
         """An empty dist-info makes the call return None rather than raise."""
@@ -66,12 +71,21 @@ class TestTheModuleWiring:
         apart. The equality assertion alone cannot catch that in a checkout, where
         a hardcoded value would happen to match ``SOURCE_VERSION``; reloading with
         the metadata patched can.
+
+        The patch is scoped with ``monkeypatch.context`` because monkeypatch's
+        own teardown runs *after* the test body: a plain ``finally`` reload would
+        still see the patched metadata and leave the module reporting the fake
+        version for the rest of the session.
         """
-        monkeypatch.setattr(metadata, "version", lambda name: "7.7.7")
-        try:
+        with monkeypatch.context() as patch:
+            patch.setattr(metadata, "version", lambda name: "7.7.7")
             assert importlib.reload(ai_monitor).__version__ == "7.7.7"
-        finally:
-            importlib.reload(ai_monitor)  # put the real value back
+
+        # Real metadata is back now, so the reload must not keep the fake value.
+        importlib.reload(ai_monitor)
+        assert ai_monitor.__version__ != "7.7.7", (
+            "the reload leaked the patched version into the session"
+        )
         assert ai_monitor.__version__ == ai_monitor._resolve_version()
 
     def test_the_reported_version_is_a_non_empty_string(self):
