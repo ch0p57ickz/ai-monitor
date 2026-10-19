@@ -609,6 +609,12 @@ covers every device on every port does **not** cover a Service VIP. A Service is
 reachable only through its own grant, which is what makes the denial check
 possible without narrowing the device rules.
 
+The other two Services advertised from this node, `svc:router-litellm` and
+`svc:vllm`, have no grant, so the packet filter carries no rule for their VIPs.
+Under Tailscale's model they are not reachable until one is added. Nothing that
+worked before depends on them: the device routes `8444` and `8445` still publish
+the same two backends (`4002` and `8000`).
+
 ### Host state as surveyed (2026-10-19)
 
 | Fact | Value |
