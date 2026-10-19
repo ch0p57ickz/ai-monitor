@@ -95,6 +95,33 @@ def test_the_unit_restarts_and_keeps_state(unit_text):
     ]
 
 
+def test_a_start_that_cannot_succeed_is_given_up_on(unit_text):
+    """``Restart=always`` must not mean "restart forever without saying so".
+
+    Observed on this host: an empty /opt/ai-monitor left ExecStart unexecutable,
+    and the unit reached 2141 restarts of status=203/EXEC while ``is-enabled``
+    still read "enabled" and ``enable --now`` had returned success. A start limit
+    turns that silent loop into a reported failure. The directives belong in
+    [Unit], not [Service], on systemd 255.
+    """
+    unit_section, _, service_section = unit_text.partition("[Service]")
+    assert _directive_values(unit_section, "StartLimitBurst") == ["10"]
+    assert _directive_values(unit_section, "StartLimitIntervalSec") == ["300"]
+    assert _directive_values(service_section, "StartLimitBurst") == [], (
+        "StartLimitBurst in [Service] is not the directive systemd reads here"
+    )
+
+
+def test_the_install_step_verifies_the_unit_actually_started():
+    """`enable --now` reports success even when the unit fails immediately."""
+    runbook = (UNIT.parent.parent / "docs" / "gx10-runbook.md").read_text("utf-8")
+    assert "systemctl is-active ai-monitor" in runbook
+    assert "systemd-analyze verify" in runbook
+    assert "reset-failed" in runbook, (
+        "a tripped start limit needs the counter cleared before a fresh start"
+    )
+
+
 def test_credentials_file_mode_matches_the_runbook(unit_text):
     """The unit's comment and the install step must agree on the mode."""
     runbook = (UNIT.parent.parent / "docs" / "gx10-runbook.md").read_text("utf-8")

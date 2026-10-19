@@ -4,6 +4,17 @@ Documentation=file:/opt/ai-monitor/docs/gx10-runbook.md
 After=network-online.target
 Wants=network-online.target
 
+# Stop retrying a start that cannot succeed, and say so. With no limit, a unit
+# whose ExecStart cannot be executed restarts forever: observed on this host as
+# 2141 restarts of status=203/EXEC (an empty /opt/ai-monitor, so no venv and no
+# binary) while `systemctl is-enabled` still read "enabled" and `enable --now`
+# had returned success. The service still restarts itself automatically; it just
+# stops retrying a start that never succeeds. Once the limit trips, the unit
+# reports failed, and `systemctl reset-failed ai-monitor` (or waiting out the
+# interval) allows a fresh start after the cause is fixed.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 # Dedicated unprivileged account. It owns its own home so the Codex CLI state

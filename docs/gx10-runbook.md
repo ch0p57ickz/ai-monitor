@@ -156,14 +156,18 @@ The JSON Lines log is the raw evidence; results are recorded in
 sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbin/nologin ai-monitor
 
 # 2. Code and virtualenv, owned by the service account.
+# A clone only works if the checkout has a remote; this repository does not, so
+# copy the working checkout instead of inventing a URL. `git clone` of a local
+# path gives a clean tree without the operator's build artifacts.
 sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
-sudo -u ai-monitor git clone <repo-url> /opt/ai-monitor
+sudo -u ai-monitor git clone /path/to/this/checkout /opt/ai-monitor
 sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 
 # Confirm the console script is on PATH inside the venv before going further.
 # The unit runs this exact binary, and `ai-monitor --version` must print the
-# release you just installed.
+# release you just installed. Skipping this step is what leaves a unit that can
+# never start: /opt/ai-monitor empty, no venv, no binary.
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 
 # 3. Configuration with credentials, readable only by the service account.
@@ -182,9 +186,40 @@ python3 -c 'import secrets; print(secrets.token_hex(32))'
 # child fails if it exists but is not writable.
 id ai-monitor && sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" \
   && echo "home is writable"
+
+# Install the unit *from this repository*. A stale copy is a real failure mode:
+# this host was found running a unit predating ReadWritePaths=/home/ai-monitor,
+# which leaves the Codex child unable to write ~/.codex under ProtectSystem=strict.
+# `diff` against the file in the repository shows any drift.
 sudo install -m 0644 deploy/ai-monitor.service /etc/systemd/system/ai-monitor.service
 sudo systemctl daemon-reload
+
+# Check the unit before starting it. `systemd-analyze verify` names the exact
+# problem the unit would hit — on this host it printed "Command
+# /opt/ai-monitor/venv/bin/ai-monitor is not executable" while /opt/ai-monitor
+# was still empty, which is precisely the state that produces status=203/EXEC.
+sudo systemd-analyze verify /etc/systemd/system/ai-monitor.service
+
 sudo systemctl enable --now ai-monitor
+
+# `enable --now` returns success even when the unit fails immediately, and
+# `is-enabled` still reads "enabled" while it crash-loops, so check that it is
+# actually running. This host reached 2141 restarts without anyone noticing.
+systemctl is-active ai-monitor
+systemctl status ai-monitor --no-pager
+journalctl -u ai-monitor -n 20 --no-pager
+```
+
+If the unit is not `active`, the journal says why. `status=203/EXEC` means the
+binary in `ExecStart` cannot be executed — almost always a missing or incomplete
+step 2. `StartLimitBurst` stops the unit after ten failed starts in five minutes
+and reports it as failed, so a broken deployment fails visibly instead of
+restarting forever; after fixing the cause, clear the counter and start again:
+
+```sh
+sudo systemctl reset-failed ai-monitor
+sudo systemctl start ai-monitor
+systemctl is-active ai-monitor
 ```
 
 ### Installing without network access

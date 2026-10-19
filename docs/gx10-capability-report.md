@@ -487,6 +487,55 @@ from a checkout, and a test pins that constant against `pyproject.toml` so the t
 cannot drift silently again. Re-verified end to end: install, upgrade, and
 rollback each report one consistent version across all three sources.
 
+## First deployment attempt: 5.2 is not complete (verified 2026-10-19)
+
+The install was attempted on this host and does not work. Recording the evidence
+because 5.2 is exactly the task that asks for this verification, and because
+`systemctl enable --now` reported success.
+
+| Check | Result |
+| --- | --- |
+| Service account | Present (`ai-monitor`, uid 996) |
+| State directory | Present, `/var/lib/ai-monitor`, `0700 ai-monitor` |
+| Config file | Present and not readable by the operator (`/etc/ai-monitor/config.json`) — correct for `0640 root:ai-monitor` |
+| Unit installed | Present at `/etc/systemd/system/ai-monitor.service` |
+| **Unit matches the repository** | **No** — the installed unit predates `ReadWritePaths=/home/ai-monitor` |
+| **`/opt/ai-monitor`** | **Empty — no checkout, no venv, no binary** |
+| Unit state | `activating (auto-restart)`, `status=203/EXEC`, restart counter **2141** |
+| API on `127.0.0.1:8732` | Not listening |
+
+Two independent problems:
+
+1. **The code and virtualenv were never installed.** `/opt/ai-monitor` is empty,
+   so `ExecStart=/opt/ai-monitor/venv/bin/ai-monitor` cannot be executed and the
+   unit exits `203/EXEC`. The runbook's step 2 was skipped, and its command was
+   part of why: it said `git clone <repo-url>`, and this repository has **no
+   remote**, so the command cannot be run as written.
+2. **The installed unit is stale.** It lacks `ReadWritePaths=/home/ai-monitor`,
+   the line that keeps the service account's home writable under
+   `ProtectSystem=strict`. Even with the code installed, the bundled Codex CLI
+   would fail to write `~/.codex`, which is the failure recorded in the reset-soak
+   finding.
+
+The failure was invisible for three reasons, all now addressed:
+
+- `systemctl enable --now` returns success when the unit fails immediately, and
+  `systemctl is-enabled` still reads `enabled` while it crash-loops. The runbook
+  now checks `systemctl is-active` and reads the journal after starting.
+- Nothing named the missing binary. `systemd-analyze verify` does — it prints
+  "Command /opt/ai-monitor/venv/bin/ai-monitor is not executable" — so the runbook
+  now runs it before starting the unit.
+- `Restart=always` retried forever with no limit, so 2141 failed starts accumulated
+  without the unit ever reporting `failed`. The unit now sets
+  `StartLimitIntervalSec=300` / `StartLimitBurst=10`, turning that loop into a
+  reported failure. A start limit does not conflict with the spec's automatic
+  restart: the service still restarts itself, it just stops retrying a start that
+  cannot succeed.
+
+Remediation, in order: install the current unit, install the code and venv, then
+`systemctl reset-failed ai-monitor` and start. The runbook's install section has
+the commands.
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |
