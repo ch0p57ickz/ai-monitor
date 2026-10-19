@@ -79,6 +79,61 @@ class TestUnknownPace:
         assert p["classification"] == "unknown"
 
 
+class TestMalformedInputs:
+    """A malformed payload must never raise nor be silently mis-classified
+    (spec: pace is ``unknown`` when measured usage is missing)."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["abc", "", "NaN", float("nan"), float("inf"), float("-inf")],
+    )
+    def test_non_finite_used_percent_is_unknown(self, bad):
+        p = compute_pace(_window(used_percent=bad), now_iso=NOW)
+        assert p["classification"] == "unknown"
+        assert p["basis"] == "none"
+
+    def test_malformed_resets_in_falls_back_to_resets_at(self):
+        """A non-numeric relative reset must not suppress a valid absolute
+        ``resets_at``."""
+        p = compute_pace(
+            _window(
+                used_percent=50.0,
+                resets_in_seconds="soon",
+                resets_at=(NOW_DT + timedelta(hours=12)).isoformat().replace("+00:00", "Z"),
+                duration_minutes=1440,
+            ),
+            now_iso=NOW,
+        )
+        assert p["classification"] != "unknown"
+        assert p["expectedUsedPercent"] == pytest.approx(50.0)
+
+    def test_non_finite_history_point_is_ignored(self):
+        """A NaN history point must not enter the measured series."""
+        hist = _history(span_seconds=1800, points=4, start_used=10.0, end_used=50.0)
+        hist.append(
+            {
+                "collected_at": NOW_DT.isoformat().replace("+00:00", "Z"),
+                "used_percent": float("nan"),
+            }
+        )
+        p = compute_pace(
+            _window(
+                used_percent=50.0,
+                resets_in_seconds=43200,
+                resets_at=(NOW_DT + timedelta(hours=12)).isoformat().replace("+00:00", "Z"),
+                duration_minutes=1440,
+            ),
+            history=hist,
+            now_iso=NOW,
+        )
+        # With the NaN point dropped, the real 10→50 series has a sufficient
+        # span and positive movement, so the basis is ``reported``. If the
+        # NaN point leaked in, it would become the newest point and
+        # ``nan > 0`` is False, degrading the basis to ``estimated``.
+        assert p["classification"] == "at"
+        assert p["basis"] == "reported"
+
+
 class TestEstimatedPace:
     def test_halfway(self):
         """Window halfway elapsed, used matches expected → 'at'."""
@@ -112,33 +167,43 @@ class TestEstimatedPace:
         assert p["basis"] == "estimated"
         assert p["classification"] == "over"
 
-    def test_clamped_at_window_end(self):
-        """Elapsed fraction clamped to 100% when window nearly ended."""
+    def test_near_end_clamped_at_100(self):
+        """Window nearly elapsed: expected fraction clamped toward 100."""
+        # 24 h duration, resets in 30 min → 1410/1440 elapsed = ~97.9%.
         p = compute_pace(
-            _window(used_percent=100.0, resets_in_seconds=60, duration_minutes=1440),
+            _window(used_percent=99.0, resets_in_seconds=1800, duration_minutes=1440),
             now_iso=NOW,
         )
         assert p["basis"] == "estimated"
-        assert p["expectedUsedPercent"] == pytest.approx(100.0, abs=1.0)
+        assert p["expectedUsedPercent"] == pytest.approx(97.92, abs=0.5)
+
+    def test_not_yet_started_is_unknown(self):
+        """A window whose reset is further out than its duration (start in the
+        future) has no elapsed fraction to pace against → unknown."""
+        # duration 1440 min (24 h) but resets in 100000 s (~27.8 h) →
+        # start = now + ~3.8 h, in the future.
+        p = compute_pace(
+            _window(used_percent=42.0, resets_in_seconds=100000, duration_minutes=1440),
+            now_iso=NOW,
+        )
+        assert p["classification"] == "unknown"
+        assert p["basis"] == "none"
 
 
 class TestReportedPace:
-    def test_reported_precedence(self):
-        """When sufficient history exists, reported takes precedence over estimated."""
-        hist = _history(span_seconds=1800.0, points=4, start_used=40.0, end_used=50.0)
-        p = compute_pace(_window(used_percent=50.0), settings=PaceSettings(), now_iso=NOW, history=hist)
-        assert p["basis"] == "reported"
+    """The reported basis is an *evidence gate*, not a different comparison.
 
-    def test_reported_at(self):
-        """Project the measured burn rate to the window end; if it lands within
-        tolerance of the even-consumption projection → 'at'.
+    The comparison is always actual used % vs the elapsed-window expectation;
+    the basis only records whether a sufficient, consecutive, same-account
+    measured series with real recent movement backs the reading.
+    """
 
-        Window: 24 h duration, resets in 12 h → horizon 43200 s.
-        History 40 → 50 over 1800 s → rate = 10/1800 ≈ 0.00556 %/s.
-        projected_end = 50 + 0.00556 * 43200 = 290 → clamps to 100.
-        expected_end = 100 * span/(span+horizon) = 100 * 1800/45000 = 4.0.
-        100 > 4 + 5 → 'over'.
-        """
+    def test_reported_basis_on_sufficient_series(self):
+        """Sufficient consecutive series with movement → basis 'reported',
+        classification still from actual vs elapsed-window expectation."""
+        # Window: 24 h duration, resets in 12 h → 50% elapsed → expected 50.
+        # Used 50 → 'at'; series 40→50 over 1800 s (consecutive, positive)
+        # upgrades the basis to 'reported'.
         hist = _history(span_seconds=1800.0, points=4, start_used=40.0, end_used=50.0)
         p = compute_pace(
             _window(used_percent=50.0, resets_in_seconds=43200, duration_minutes=1440),
@@ -147,57 +212,54 @@ class TestReportedPace:
             history=hist,
         )
         assert p["basis"] == "reported"
-        assert p["classification"] == "over"
-        assert p["expectedUsedPercent"] == 100.0
+        assert p["classification"] == "at"
+        assert p["expectedUsedPercent"] == pytest.approx(50.0, abs=0.5)
 
     def test_reported_over(self):
-        """Projection well above the even-consumption end-use → 'over'.
-
-        Window: 24 h duration, resets in 6 h → horizon 21600 s.
-        History 0 → 30 over 1800 s → rate = 30/1800 ≈ 0.01667 %/s.
-        projected_end = 30 + 0.01667 * 21600 = 390 → clamped to 100.
-        expected_end = 100 * 1800/(1800+21600) ≈ 7.69.
-        100 > 7.69 + 5 → 'over'.
-        """
-        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=30.0)
+        """Same series, but actual used is well above the elapsed expectation
+        → 'over', with the basis still 'reported'."""
+        # Expected 50 (24 h, 12 h elapsed), actual 90 → over.
+        hist = _history(span_seconds=1800.0, points=4, start_used=80.0, end_used=90.0)
         p = compute_pace(
-            _window(used_percent=30.0, resets_in_seconds=21600, duration_minutes=1440),
+            _window(used_percent=90.0, resets_in_seconds=43200, duration_minutes=1440),
             settings=PaceSettings(),
             now_iso=NOW,
             history=hist,
         )
         assert p["basis"] == "reported"
         assert p["classification"] == "over"
-        assert p["expectedUsedPercent"] == 100.0
+        assert p["expectedUsedPercent"] == pytest.approx(50.0, abs=0.5)
 
     def test_reported_under(self):
-        """Projection below the even-consumption end-use → 'under'.
-
-        This is the case the old rate-vs-pace-rate math made unreachable; with
-        the consistent projected-end comparison it is reachable.
-
-        Window: 1 h duration (3600 s), resets in 1200 s (start was 2400 s
-        ago → 66.7% elapsed) → horizon 1200 s. History 10 → 12 over 1800 s
-        → rate = 2/1800 ≈ 0.001111 %/s.
-        projected_end = 12 + 0.001111 * 1200 = 13.33.
-        expected_end = 100 * span/(span+horizon) = 100 * 1800/3000 = 60.0.
-        The even-consumption baseline says ~60% used by reset (66.7% of the
-        window elapsed), but this window is only at ~12% and burning slowly,
-        so the projection (13.33) is well below 60 → 'under'.
-        """
-        hist = _history(span_seconds=1800.0, points=4, start_used=10.0, end_used=12.0)
+        """Same series, but actual used is well below the elapsed expectation
+        → 'under', with the basis still 'reported'."""
+        # Expected 50 (24 h, 12 h elapsed), actual 10 → under.
+        hist = _history(span_seconds=1800.0, points=4, start_used=0.0, end_used=10.0)
         p = compute_pace(
-            _window(used_percent=12.0, resets_in_seconds=1200, duration_minutes=60),
+            _window(used_percent=10.0, resets_in_seconds=43200, duration_minutes=1440),
             settings=PaceSettings(),
             now_iso=NOW,
             history=hist,
         )
         assert p["basis"] == "reported"
         assert p["classification"] == "under"
-        assert p["expectedUsedPercent"] == pytest.approx(13.33, abs=0.2)
+        assert p["expectedUsedPercent"] == pytest.approx(50.0, abs=0.5)
+
+    def test_expected_is_elapsed_window_fraction(self):
+        """The spec's authoritative repro: a window half elapsed and half used
+        reads 'at' at the elapsed-window expectation (~50%), never 'over'."""
+        hist = _history(span_seconds=1800.0, points=4, start_used=40.0, end_used=50.0)
+        p = compute_pace(
+            _window(used_percent=50.0, resets_in_seconds=43200, duration_minutes=1440),
+            settings=PaceSettings(),
+            now_iso=NOW,
+            history=hist,
+        )
+        assert p["classification"] == "at"
+        assert p["expectedUsedPercent"] == pytest.approx(50.0, abs=0.5)
 
     def test_insufficient_span(self):
-        """History span below min_span_seconds → falls through to estimated or unknown."""
+        """History span below min_span_seconds → not reported (estimated)."""
         # Only 60 s span → too short for reported.
         hist = [
             {"collected_at": (NOW_DT - timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
@@ -222,7 +284,7 @@ class TestReportedPace:
         assert p["basis"] == "estimated"
 
     def test_no_spend(self):
-        """No positive delta in history → not reported."""
+        """Flat series (no positive delta) → not reported (estimated)."""
         hist = [
             {"collected_at": (NOW_DT - timedelta(seconds=900)).isoformat().replace("+00:00", "Z"),
              "used_percent": 50.0},
@@ -233,19 +295,22 @@ class TestReportedPace:
         assert p["basis"] == "estimated"
 
     def test_single_point_insufficient(self):
-        """A single history row + current point = 2 points but span may be 0."""
+        """A single history row at NOW + current point → span 0, not reported."""
         hist = [{"collected_at": NOW_DT.isoformat().replace("+00:00", "Z"), "used_percent": 42.0}]
         p = compute_pace(_window(used_percent=42.0), now_iso=NOW, history=hist)
-        # 2 points, same time → span 0 < min_span → not reported.
         assert p["basis"] == "estimated"
 
 
 class TestTolerance:
+    # All tolerance tests use a 24 h window that is 50% elapsed (resets in
+    # 12 h) so the elapsed-window expectation is 50.
+    _WIN = dict(resets_in_seconds=43200, duration_minutes=1440)
+
     def test_at_boundary(self):
         """Exactly at tolerance boundary → 'at'."""
         # Expected 50, actual 55, tolerance 5 → |55-50|=5 ≤ 5 → 'at'
         p = compute_pace(
-            _window(used_percent=55.0, resets_in_seconds=43200, duration_minutes=1440),
+            _window(used_percent=55.0, **self._WIN),
             settings=PaceSettings(tolerance_percent=5.0),
             now_iso=NOW,
         )
@@ -254,7 +319,7 @@ class TestTolerance:
     def test_over_boundary(self):
         """Just above tolerance → 'over'."""
         p = compute_pace(
-            _window(used_percent=56.0, resets_in_seconds=43200, duration_minutes=1440),
+            _window(used_percent=56.0, **self._WIN),
             settings=PaceSettings(tolerance_percent=5.0),
             now_iso=NOW,
         )
@@ -262,7 +327,7 @@ class TestTolerance:
 
     def test_under_boundary(self):
         p = compute_pace(
-            _window(used_percent=44.0, resets_in_seconds=43200, duration_minutes=1440),
+            _window(used_percent=44.0, **self._WIN),
             settings=PaceSettings(tolerance_percent=5.0),
             now_iso=NOW,
         )

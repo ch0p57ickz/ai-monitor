@@ -70,20 +70,6 @@ def unknown_pace() -> dict[str, Any]:
     return {"classification": "unknown", "basis": "none", "expectedUsedPercent": None}
 
 
-def reported_pace(
-    classification: str,
-    expected_used_percent: float | None,
-) -> dict[str, Any]:
-    return {"classification": classification, "basis": "reported", "expectedUsedPercent": expected_used_percent}
-
-
-def estimated_pace(
-    classification: str,
-    expected_used_percent: float | None,
-) -> dict[str, Any]:
-    return {"classification": classification, "basis": "estimated", "expectedUsedPercent": expected_used_percent}
-
-
 # ---------------------------------------------------------------------------
 # Quota window
 # ---------------------------------------------------------------------------

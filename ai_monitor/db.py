@@ -238,43 +238,47 @@ class Database:
         hours: int,
         limit: int,
         source: str | None = None,
+        account_id: str | None = None,
+        newest_first: bool = False,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Return successful observations in ascending collected_at order.
+        """Return successful observations within the time window.
 
-        Returns (observations, truncated). ``truncated`` is True when more
-        matching records exist than the limit allows.
+        By default rows are returned in ascending ``collected_at`` order. Set
+        ``newest_first`` to order descending, which selects the *most recent*
+        ``limit`` rows — required for pace, where only the recent tail of a
+        series is meaningful (an ascending LIMIT would return the oldest rows
+        and starve the recent history).
+
+        ``account_id`` restricts to a single account when provided (spec:
+        same-account pace history). Returns (observations, truncated).
+        ``truncated`` is True when more matching records exist than the limit
+        allows.
         """
         cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=hours)
         ).strftime("%Y-%m-%dT%H:%M:%S")
+        conditions = ["collected_at >= ?", "status = 'success'"]
+        params: list[Any] = [cutoff]
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if account_id is not None:
+            conditions.append("account_id = ?")
+            params.append(account_id)
+        order = "DESC" if newest_first else "ASC"
+        params.append(limit + 1)
+        # ``collected_at`` is second-precision, so break ties by ``id`` to make
+        # "newest N" deterministic (matching ``latest_per_source``).
+        sql = (
+            "SELECT source, provider, collected_at, observed_at, "
+            "account_id, status, quota_windows_json, budgets_json, notes_json "
+            "FROM observations "
+            f"WHERE {' AND '.join(conditions)} "
+            f"ORDER BY collected_at {order}, id {order} "
+            "LIMIT ?"
+        )
         with self._lock:
-            if source:
-                rows = self._conn.execute(
-                    """
-                    SELECT source, provider, collected_at, observed_at,
-                           account_id, status, quota_windows_json,
-                           budgets_json, notes_json
-                    FROM observations
-                    WHERE collected_at >= ? AND status = 'success'
-                      AND source = ?
-                    ORDER BY collected_at ASC
-                    LIMIT ?
-                    """,
-                    (cutoff, source, limit + 1),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """
-                    SELECT source, provider, collected_at, observed_at,
-                           account_id, status, quota_windows_json,
-                           budgets_json, notes_json
-                    FROM observations
-                    WHERE collected_at >= ? AND status = 'success'
-                    ORDER BY collected_at ASC
-                    LIMIT ?
-                    """,
-                    (cutoff, limit + 1),
-                ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         truncated = len(rows) > limit
         rows = rows[:limit]
         return [_row_to_obs(row) for row in rows], truncated

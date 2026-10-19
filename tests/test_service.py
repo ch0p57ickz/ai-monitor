@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import time
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -266,42 +267,227 @@ class TestUsageWorker:
         assert entry is not None
         assert entry["source"] == "codex"
 
-    def test_unexpected_exception_does_not_kill_scheduler(
+    def test_window_history_reads_stored_rows_and_filters_account(
         self, sample_config: Config, sample_db: Database
     ):
-        """A source that raises an unexpected (non-CollectionError) exception
-        must not take down the scheduler: the run loop survives and the
-        remaining sources keep polling (spec: independent per-source polling).
+        """``_window_history`` must read the camelCase keys that
+        ``db.history`` returns (``quotaWindows`` / ``usedPercent`` /
+        ``collectedAt``), and restrict to the same account when one is known.
+
+        Regression: the method previously read snake_case keys, so it always
+        returned an empty history and the ``reported`` pace basis could never
+        fire in production.
         """
-
-        class BoomAdapter(SourceAdapter):
-            def fetch(self, config):
-                raise RuntimeError("boom: unexpected failure")
-
-        class OkAdapter(SourceAdapter):
-            def fetch(self, config):
-                return {"status": "success", "quota_windows": [{"id": "ag-w", "used_percent": 30.0}]}
+        def make_acct_adapter(account_id: str):
+            class _AcctAdapter(SourceAdapter):
+                def fetch(self, config):
+                    return {
+                        "status": "success",
+                        "account_id": account_id,
+                        "quota_windows": [
+                            {"id": "w", "used_percent": 50.0, "duration_minutes": 60}
+                        ],
+                    }
+            return _AcctAdapter
 
         worker = UsageWorker(
             config=sample_config,
             db=sample_db,
-            registry={"codex": BoomAdapter, "antigravity": OkAdapter},
+            registry={"codex": make_acct_adapter("acct1")},
+        )
+        codex_worker = worker._workers["codex"]
+        worker._poll_source(codex_worker)
+        worker._poll_source(codex_worker)
+
+        hist = worker._window_history("codex", account_id="acct1")
+        assert "w" in hist, "history must be non-empty (camelCase keys read correctly)"
+        assert len(hist["w"]) == 2
+        assert hist["w"][0]["used_percent"] == 50.0
+        assert hist["w"][0]["collected_at"]
+
+        # A different account must not see the first account's rows.
+        assert worker._window_history("codex", account_id="acct2") == {}
+
+    def test_window_history_returns_newest_rows(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """``_window_history`` must return the *most recent* rows, not the
+        oldest.
+
+        Regression: ``db.history`` ordered ascending, so an ascending LIMIT
+        returned the earliest rows in the lookback window and the recent tail
+        required for the ``reported`` pace basis became unreachable after the
+        first hour of uptime.
+        """
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        base = datetime.now(UTC)
+        # 60 rows, 10 minutes apart (10 h total, inside the 48 h lookback);
+        # used_percent increases with recency so the assertion can tell which
+        # end of the series was returned.
+        total = 60
+        for i in range(total):
+            raw = {
+                "status": "success",
+                "quota_windows": [{"id": "w", "used_percent": float(i)}],
+            }
+            obs = normalize_observation(source, raw)
+            ts = base - timedelta(minutes=10 * (total - 1 - i))
+            obs.collected_at = ts.replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            )
+            sample_db.insert_observation(source, obs)
+
+        worker = UsageWorker(config=sample_config, db=sample_db)
+        hist = worker._window_history("codex", limit=24)
+        assert len(hist["w"]) == 24
+        used = sorted(r["used_percent"] for r in hist["w"])
+        # Only the newest 24 rows (i = 36..59) must be present.
+        assert used == [float(i) for i in range(total - 24, total)]
+
+    def test_reported_basis_fires_end_to_end(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """The ``reported`` pace basis must fire through the real poll path
+        when a sufficient recent same-window series exists.
+
+        This covers the composition of ``_window_history`` and
+        ``enrich_observation`` inside ``_poll_source`` — the seam where the
+        history-read bug lived (camelCase keys + oldest-row ordering), which
+        isolated unit tests could not catch.
+        """
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        base = datetime.now(UTC)
+        # 60 rows, 60 s apart, used_percent rising. More rows than the history
+        # ``limit`` (24) is deliberate: with the old oldest-row ordering the
+        # returned tail would end ~35 min before now, exceeding
+        # max_gap_seconds (1800 s), so ``reported`` could not fire.
+        n = 60
+        for i in range(n):
+            raw = {
+                "status": "success",
+                "quota_windows": [
+                    {"id": "w", "used_percent": 10.0 + 0.5 * i, "duration_minutes": 120}
+                ],
+            }
+            obs = normalize_observation(source, raw)
+            ts = base - timedelta(seconds=60 * (n - i))
+            obs.collected_at = ts.replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            )
+            sample_db.insert_observation(source, obs)
+
+        class LiveAdapter(SourceAdapter):
+            def fetch(self, config):
+                # Live window: 120 min duration resetting in 3600 s → the
+                # window is half elapsed, so the elapsed-window expectation
+                # is 50%. Actual used (55%) is within tolerance → "at".
+                return {
+                    "status": "success",
+                    "quota_windows": [
+                        {
+                            "id": "w",
+                            "used_percent": 55.0,
+                            "duration_minutes": 120,
+                            "resets_in_seconds": 3600,
+                        }
+                    ],
+                }
+
+        worker = UsageWorker(
+            config=sample_config, db=sample_db, registry={"codex": LiveAdapter}
+        )
+        worker._poll_source(worker._workers["codex"])
+        obs = worker._workers["codex"].last_observation
+        assert obs is not None
+        pace = obs.quota_windows[0].pace
+        assert pace["basis"] == "reported"
+        assert pace["expectedUsedPercent"] == pytest.approx(50.0)
+        assert pace["classification"] == "at"
+
+    def test_unexpected_exception_does_not_kill_scheduler(
+        self, sample_config: Config, sample_db: Database, monkeypatch
+    ):
+        """A source whose polling raises an unexpected (non-CollectionError)
+        exception must not take down the scheduler.
+
+        Regression: the loop guard in ``_run()`` only matters for exceptions
+        that *escape* ``_poll_source``. A crash inside the adapter's
+        ``fetch`` is already caught by ``_poll_source``'s own try/except (into
+        an ``unknown`` error), so the test makes the crash originate *after*
+        that catch — by monkeypatching ``_poll_source`` to raise for
+        antigravity, so the exception reaches the per-source guard in the
+        while-loop.
+
+        Ordering matters: ``_workers`` is built in ``SOURCE_DEFS`` order
+        (codex, antigravity, ...), and ``_run()`` iterates that order. The
+        healthy source (codex) must therefore come FIRST and the crashing
+        source (antigravity) SECOND, so that on the crash cycle codex has
+        already been dispatched. Without the loop guard, antigravity's crash
+        aborts ``_run()`` and the thread dies, freezing codex's poll count;
+        with the guard, codex keeps polling on later cycles.
+        """
+        poll_counts: dict[str, int] = {"codex": 0, "antigravity": 0}
+
+        def make_ok(key: str):
+            class _OkAdapter(SourceAdapter):
+                def fetch(self, config):
+                    poll_counts[key] += 1
+                    return {"status": "success", "quota_windows": [{"id": f"{key}-w", "used_percent": 30.0}]}
+            return _OkAdapter
+
+        worker = UsageWorker(
+            config=sample_config,
+            db=sample_db,
+            registry={"codex": make_ok("codex"), "antigravity": make_ok("antigravity")},
         )
 
-        # Pre-set stop so _run() does its startup poll and then exits the
-        # while loop after the first iteration (condition false). This makes
-        # _run() run synchronously and deterministically.
-        worker._stop.set()
+        # Make antigravity's poll raise an unexpected exception (post-catch),
+        # so it escapes _poll_source and hits the _run() per-source guard.
+        real_poll = worker._poll_source
 
-        # Must not raise, even though codex's adapter blows up.
-        worker._run()
+        def boom_poll(src):
+            # ``src`` is a _SourceWorker; its ``.source`` is a SourceDef, whose
+            # ``.source`` is the string key.
+            if src.source.source == "antigravity":
+                poll_counts["antigravity"] += 1
+                raise RuntimeError("boom: unexpected failure outside _poll_source")
+            real_poll(src)
 
-        # Both sources were polled; codex's crash did not abort the loop, so
-        # antigravity (the other source in the loop) still ran to success.
-        assert worker._workers["codex"]._last_polled_at is not None
-        ag = worker._workers["antigravity"]
-        assert ag._last_polled_at is not None
-        assert ag.status == SourceStatus.SUCCESS
+        monkeypatch.setattr(worker, "_poll_source", boom_poll)
+
+        # Speed up the loop so several cycles complete quickly. SourceDef is
+        # frozen, so use dataclasses.replace to rebuild it.
+        for w in worker._workers.values():
+            w.source = dataclasses.replace(w.source, cadence_seconds=0)
+        worker.start()
+        # Wait until codex has been dispatched on at least three cycles, with
+        # a bounded deadline, instead of a fixed sleep that depends on the
+        # machine keeping up. `stop()` already joins the thread.
+        deadline = time.monotonic() + 5.0
+        while (
+            poll_counts["codex"] < 3
+            and worker._thread.is_alive()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        worker.stop()
+
+        # antigravity's poll crashed on every cycle; the scheduler survived.
+        assert poll_counts["antigravity"] >= 2, (
+            "antigravity should have been re-polled after crashing"
+        )
+        # codex gets one poll at startup and one in the first loop cycle
+        # *before* antigravity crashes. Without the loop guard the thread dies
+        # on that first crash, so codex would stop at 2. Requiring >= 3 proves
+        # the while-loop survived antigravity's crashes and kept dispatching
+        # codex on later cycles.
+        assert poll_counts["codex"] >= 3, (
+            "codex should have been re-polled on subsequent loop cycles, "
+            "proving the while-loop survived antigravity's crashes"
+        )
+        assert worker._workers["codex"].status == SourceStatus.SUCCESS
 
 
 class TestHttpEndpoints:

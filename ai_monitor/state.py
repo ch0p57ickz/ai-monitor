@@ -310,8 +310,12 @@ class UsageWorker:
             # reset/duration (estimated elapsed fraction). The current
             # row has not been committed yet, so the history is prior
             # rows only.
-            history = self._window_history(worker.source.source)
-            raw = enrich_observation(worker.source, raw, self._pace_settings, history)
+            history = self._window_history(
+                worker.source.source, account_id=raw.get("account_id")
+            )
+            raw = enrich_observation(
+                worker.source, raw, self._pace_settings, history, now_iso=now
+            )
             obs = normalize_observation(worker.source, raw)
             obs.collected_at = now
         else:
@@ -334,29 +338,48 @@ class UsageWorker:
     def _window_history(
         self,
         source_key: str,
+        account_id: Optional[str] = None,
         limit: int = 24,
         hours: float = 48.0,
     ) -> dict[str, list[dict[str, Any]]]:
         """Build the per-window history for pace calculation.
 
-        Maps a quota-window ``id`` to its list of prior normalized rows
-        (newest first), each carrying ``collected_at`` and ``used_percent``.
-        Rows are restricted to this source's last few successful snapshots
-        so the reported spend-rate stays on recent, consecutive data.
+        Maps a quota-window ``id`` to its list of prior normalized rows, each
+        carrying ``collected_at`` and ``used_percent``. Rows are restricted
+        to this source's *most recent* successful snapshots, and — when the
+        current poll reports an ``account_id`` — to snapshots from the *same
+        account* (spec: same-account history), so a reported series can never
+        mix accounts.
+
+        ``newest_first=True`` is essential: an ascending ``LIMIT`` would
+        return the *oldest* rows in the lookback window, making the recent
+        tail (and therefore the ``reported`` basis) permanently unreachable
+        after the first hour of uptime. The account filter is applied in SQL
+        so foreign-account rows cannot starve the same-account history.
+
+        Note: ``db.history`` returns camelCase row dicts (``quotaWindows``,
+        ``usedPercent``, ``collectedAt``, ``accountId``), matching the API
+        serialization.
         """
         try:
-            rows, _ = self._db.history(source=source_key, hours=hours, limit=limit)
+            rows, _ = self._db.history(
+                source=source_key,
+                account_id=account_id,
+                hours=hours,
+                limit=limit,
+                newest_first=True,
+            )
         except Exception:  # noqa: BLE001
             return {}
         history: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
-            for w in row.get("quota_windows") or []:
+            for w in row.get("quotaWindows") or []:
                 wid = w.get("id")
-                used = w.get("used_percent")
+                used = w.get("usedPercent")
                 if not wid or used is None:
                     continue
                 history.setdefault(wid, []).append(
-                    {"collected_at": row.get("collected_at"), "used_percent": used}
+                    {"collected_at": row.get("collectedAt"), "used_percent": used}
                 )
         return history
 

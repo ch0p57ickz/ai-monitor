@@ -1,22 +1,34 @@
 """Pace classification for quota windows and budgets.
 
-Implements the pace requirement from the usage-snapshots spec and the
-"explicit about evidence" decision from the design:
+Implements the pace requirement from the usage-snapshots spec: for a quota
+with measured used percentage and reliable start and end, expected used
+percentage is the *elapsed fraction of the window* (clamped 0-100) and the
+actual used percentage is classified ``under`` / ``at`` / ``over`` with a
+configurable tolerance (default five percentage points).
 
-- ``reported``  — measured recent spend over a sufficient span of
-  consecutive, same-account snapshots, projected to the end of the window.
-- ``estimated`` — the elapsed fraction of a window whose start is inferred
-  from a plausible reset time and duration.
+Two bases are distinguished by how strongly the evidence supports that
+classification:
+
+- ``estimated`` — only the window's reset time and duration are known, so
+  the start is inferred from them. The elapsed-window expectation is used
+  directly.
+- ``reported``  — in addition to the window bounds, there is a measured
+  recent spend series over a sufficient span of consecutive, same-account
+  snapshots. The elapsed-window expectation is still what the actual used
+  percentage is compared against, but the classification is only labeled
+  ``reported`` when the measured series shows real, recent movement —
+  otherwise it degrades to ``estimated`` (so a stale flat series does not
+  masquerade as strong evidence).
 - ``none``      — insufficient evidence. The pace is always an object with
   ``classification == "unknown"``.
 
-Classification is ``under`` / ``at`` / ``over`` relative to the expected
-used percentage at the end of the window, using a configurable tolerance
-(default five percentage points). Expected values are clamped to 0-100.
+``expectedUsedPercent`` is the elapsed-window expectation in both bases, so
+it means the same thing whether the basis is ``reported`` or ``estimated``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
@@ -33,14 +45,18 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PaceSettings:
-    """Thresholds for deciding when pace has enough evidence.
+    """Thresholds for deciding whether pace evidence earns the ``reported`` label.
+
+    The comparison target is always the elapsed-window expectation; these
+    thresholds only gate the *basis* label.
 
     min_span_seconds:
-        Minimum span (plus the current point) required before a reported
-        spend-rate projection is meaningful.
+        Minimum span (plus the current point) of a consecutive measured
+        series before it is strong enough to label the reading ``reported``.
     max_gap_seconds:
         Maximum gap between consecutive snapshots for the series to count as
-        "recent and consecutive". A larger gap means the trend is stale.
+        "recent and consecutive". A larger gap means the series is stale, so
+        the reading falls back to ``estimated``.
     tolerance_percent:
         The configurable tolerance (default 5 percentage points) used to
         decide ``under`` / ``at`` / ``over``.
@@ -49,11 +65,6 @@ class PaceSettings:
     min_span_seconds: float = 600.0
     max_gap_seconds: float = 1800.0
     tolerance_percent: float = 5.0
-
-
-def unknown_pace() -> dict[str, Any]:
-    """The canonical 'unknown' pace object (always an object, never null)."""
-    return {"classification": "unknown", "basis": "none", "expectedUsedPercent": None}
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +77,25 @@ def _get(d: dict[str, Any], *keys: str) -> Any:
         if k in d and d[k] is not None:
             return d[k]
     return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    """Coerce ``value`` to float, or return None when it is not a finite number.
+
+    Guards against malformed provider payloads (a used percent sent as a
+    non-numeric string, or a JSON ``NaN``/``Infinity``) so a single bad
+    window cannot raise, nor be silently mis-classified, and drop or corrupt
+    the whole source.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -120,136 +150,106 @@ def compute_pace(
     the *same window id and account*, each carrying ``collected_at`` (ISO)
     and ``used_percent``.
 
+    The required rule (usage-snapshots spec): expected used percentage is
+    the *elapsed fraction of the window*, clamped 0-100, and the actual
+    used percentage is classified ``under`` / ``at`` / ``over`` against it
+    with ``tolerance_percent``. ``expectedUsedPercent`` is that expectation
+    in both bases.
+
+    The basis labels how strongly the evidence supports the reading:
+    ``reported`` when a sufficient, consecutive, same-account measured
+    series with real recent movement exists alongside the window bounds;
+    otherwise ``estimated`` (start inferred from reset and duration);
+    otherwise ``none`` (unknown).
+
     Returns the pace object
     ``{"classification", "basis", "expectedUsedPercent"}``.
     """
     settings = settings or PaceSettings()
     now = _parse_iso(now_iso) or datetime.now(timezone.utc)
 
-    used = _get(window, "usedPercent", "used_percent")
+    used_value = _as_float(_get(window, "usedPercent", "used_percent"))
 
-    # -- reported spend-rate projection (preferred) ------------------------
-    # The strongest available evidence is a measured recent spend series
-    # over the same window: project the measured rate to the end of the
-    # window, then compare the measured use with that projection. It
-    # requires a sufficient, consecutive, positive-spend span and a
-    # determinable horizon. When this succeeds it supersedes the
-    # elapsed-window estimate because it is based on observed spend rather
-    # than a time-based assumption.
-    if used is not None and history:
-        pace = _reported_pace(window, now, settings, list(history))
-        if pace is not None:
-            return pace
+    if used_value is None:
+        return unknown_pace()
 
-    # -- estimated elapsed-window fraction (fallback) ----------------------
-    # "For a quota with measured used percentage and reliable start and
-    # end, the service SHALL calculate expected used percentage from
-    # elapsed fraction of the window" — basis ``estimated`` when the start
-    # is inferred from reset minus duration, clamped to 0-100.
-    if used is not None:
-        resets_in_seconds = _get(window, "resetsInSeconds", "resets_in_seconds")
-        resets_at = _get(window, "resetsAt", "resets_at")
-        duration_minutes = _get(window, "durationMinutes", "duration_minutes")
-        start, end = _window_bounds(
-            resets_in_seconds=resets_in_seconds,
-            resets_at=resets_at,
-            duration_minutes=duration_minutes,
-            now=now,
-        )
-        if start is not None and end is not None:
-            total = (end - start).total_seconds()
-            if total > 0:
-                elapsed_fraction = _clamp01((now - start).total_seconds() / total)
-                expected = _clamp_percent(elapsed_fraction * 100.0)
-                return {
-                    "classification": _classify(expected, float(used), settings.tolerance_percent),
-                    "basis": "estimated",
-                    "expectedUsedPercent": round(expected, 2),
-                }
+    # Elapsed-window expectation: the required comparison target. The end is
+    # the reset time — a provider's ``resets_in_seconds`` (relative to now)
+    # is preferred because it is live; otherwise the absolute ``resets_at``;
+    # the start is end - duration_minutes.
+    # A non-numeric or non-finite ``resetsInSeconds`` coerces to None, so a
+    # malformed relative reset does not suppress a valid absolute
+    # ``resetsAt``. ``resetsInSeconds`` (live, relative to the poll) is
+    # otherwise preferred over the absolute ``resetsAt``.
+    resets_in_seconds = _as_float(_get(window, "resetsInSeconds", "resets_in_seconds"))
+    duration_minutes = _get(window, "durationMinutes", "duration_minutes")
+    start, end = _window_bounds(
+        reset_at=None if resets_in_seconds is not None else _parse_iso(_get(window, "resetsAt", "resets_at")),
+        reset_in_seconds=resets_in_seconds,
+        duration_minutes=duration_minutes,
+        now=now,
+    )
+    if start is None or end is None:
+        return unknown_pace()
 
-    return unknown_pace()
+    # ``_window_bounds`` guarantees a strictly positive duration, so
+    # ``total`` is always > 0 here.
+    total = (end - start).total_seconds()
+    elapsed_fraction = _clamp01((now - start).total_seconds() / total)
+    expected = _clamp_percent(elapsed_fraction * 100.0)
+    classification = _classify(expected, used_value, settings.tolerance_percent)
+
+    # ``reported`` only when a sufficient measured same-account series with
+    # real, recent movement exists; otherwise the reading is an ``estimated``
+    # elapsed-window fraction.
+    basis = "estimated"
+    if history and _reported_evidence(window, now, settings, list(history)):
+        basis = "reported"
+
+    return {
+        "classification": classification,
+        "basis": basis,
+        "expectedUsedPercent": round(expected, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
-# reported spend-rate (internal)
+# reported basis evidence (internal)
 # ---------------------------------------------------------------------------
 
 
-def _reported_pace(
+def _reported_evidence(
     window: dict[str, Any],
     now: datetime,
     settings: PaceSettings,
     history: list[dict[str, Any]],
-) -> Optional[dict[str, Any]]:
-    """Project from a consecutive same-account series of measurements.
+) -> bool:
+    """Whether a measured series justifies the ``reported`` basis label.
 
-    Returns None when the series is insufficient (too short, too gappy, no
-    measurable net spend, or no horizon to project over).
+    The elapsed-window expectation is the comparison target in every case;
+    this gate only decides how strongly the evidence supports the reading.
+    A ``reported`` label requires a measured recent spend series over a
+    sufficient span of consecutive snapshots that shows real recent movement
+    (positive net used percent over the span). Otherwise the reading degrades
+    to ``estimated`` — a stale or flat series is not strong evidence.
     """
     points = _gather_points(window, now, history)
     if len(points) < 2:
-        return None
+        return False
 
-    # Consecutive-gap checks.
+    # Consecutive: no gap larger than the maximum. ``points`` is sorted
+    # ascending by timestamp, so gaps are never negative.
     for (t0, _), (t1, _) in zip(points, points[1:]):
         gap = (t1 - t0).total_seconds()
-        if gap < 0:
-            return None
         if gap > settings.max_gap_seconds:
-            return None
+            return False
 
     span = (points[-1][0] - points[0][0]).total_seconds()
-    if span <= 0 or span < settings.min_span_seconds:
-        return None
+    if span < settings.min_span_seconds:
+        return False
 
-    delta = points[-1][1] - points[0][1]
-    if delta <= 0:
-        return None
-
-    rate = delta / span  # measured percent per second
-
-    # The window's total duration, in seconds.
-    duration_minutes = _get(window, "durationMinutes", "duration_minutes")
-    if duration_minutes is None:
-        return None
-    try:
-        total_seconds = float(duration_minutes) * 60.0
-    except (TypeError, ValueError):
-        return None
-    if total_seconds <= 0:
-        return None
-
-    # Horizon from now to the window end. Fall back to the remaining
-    # duration when the reset is not determinable, so a projection is still
-    # possible.
-    horizon = _horizon_seconds(window, now)
-    if horizon is None:
-        horizon = max(0.0, total_seconds)
-
-    # Project the measured spend rate forward to the window end.
-    projected_end = _clamp_percent(points[-1][1] + rate * horizon)
-
-    # The expected end-use, for comparison, is the even-consumption
-    # projection: the whole window is consumed by reset, so with ``span``
-    # seconds of measured activity and ``horizon`` seconds remaining, the
-    # expected use at reset under even consumption is 100% * span / (span +
-    # horizon). The classification compares the projected end-use against
-    # that baseline with the same tolerance the estimated path uses, so the
-    # classification and expectedUsedPercent always agree.
-    expected_end = _clamp_percent(100.0 * span / (span + horizon))
-    tolerance = settings.tolerance_percent
-    if projected_end > expected_end + tolerance:
-        classification = "over"
-    elif projected_end < expected_end - tolerance:
-        classification = "under"
-    else:
-        classification = "at"
-
-    return {
-        "classification": classification,
-        "basis": "reported",
-        "expectedUsedPercent": round(projected_end, 2),
-    }
+    # Real recent movement: net positive used percent over the span.
+    return (points[-1][1] - points[0][1]) > 0
 
 
 def _gather_points(
@@ -259,35 +259,20 @@ def _gather_points(
 ) -> list[tuple[datetime, float]]:
     """Build the ascending (time, used_percent) series for this window."""
     points: list[tuple[datetime, float]] = []
-    used = _get(window, "usedPercent", "used_percent")
+    used = _as_float(_get(window, "usedPercent", "used_percent"))
     if used is not None:
-        points.append((now, float(used)))
+        points.append((now, used))
     for row in history:
         collected = row.get("collected_at") or row.get("collectedAt")
         prior = row.get("used_percent")
         if prior is None:
             prior = row.get("usedPercent")
         ts = _parse_iso(collected)
-        if ts is not None and prior is not None:
-            points.append((ts, float(prior)))
+        prior_value = _as_float(prior)
+        if ts is not None and prior_value is not None:
+            points.append((ts, prior_value))
     points.sort(key=lambda p: p[0])
     return points
-
-
-def _horizon_seconds(window: dict[str, Any], now: datetime) -> Optional[float]:
-    """Seconds from now to the window end, if determinable."""
-    resets_in_seconds = _get(window, "resetsInSeconds", "resets_in_seconds")
-    if resets_in_seconds is not None:
-        try:
-            return max(0.0, float(resets_in_seconds))
-        except (TypeError, ValueError):
-            pass
-    resets_at = _get(window, "resetsAt", "resets_at")
-    if resets_at:
-        reset = _parse_iso(resets_at)
-        if reset is not None:
-            return max(0.0, (reset - now).total_seconds())
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -297,26 +282,25 @@ def _horizon_seconds(window: dict[str, Any], now: datetime) -> Optional[float]:
 
 def _window_bounds(
     *,
-    resets_in_seconds: Any,
-    resets_at: Any,
+    reset_at: Optional[datetime],
+    reset_in_seconds: Any,
     duration_minutes: Any,
     now: datetime,
 ) -> tuple[Optional[datetime], Optional[datetime]]:
     """Return (start, end) datetimes, or (None, None) when implausible.
 
-    The end is ``reset`` (from ``resets_in_seconds`` or ``resets_at``). The
-    start is ``end - duration_minutes``. The pair is accepted only when the
-    start is not in the future and the end is not more than a day in the
-    past (a stale reset is not a live window).
+    The end is the window's reset time: an explicit ``reset_at`` if given,
+    otherwise ``now + reset_in_seconds``. The start is ``end -
+    duration_minutes``. The pair is accepted only when the start is not in
+    the future and the end is not in the past (a stale or not-yet-started
+    reset is not a live window).
     """
-    end: Optional[datetime] = None
-    if resets_in_seconds is not None:
+    end: Optional[datetime] = reset_at
+    if end is None and reset_in_seconds is not None:
         try:
-            end = now + timedelta(seconds=float(resets_in_seconds))
+            end = now + timedelta(seconds=float(reset_in_seconds))
         except (TypeError, ValueError):
             end = None
-    elif resets_at:
-        end = _parse_iso(resets_at)
     if end is None:
         return None, None
 
