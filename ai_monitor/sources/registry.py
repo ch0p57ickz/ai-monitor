@@ -13,6 +13,8 @@ import subprocess
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -20,11 +22,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 class CollectionError(Exception):
-    """A collector-level error with a spec error category."""
+    """A collector-level error with a spec error category.
 
-    def __init__(self, category: str, message: str) -> None:
+    ``retry_after`` carries a provider-supplied minimum delay in seconds
+    (for example an HTTP ``Retry-After`` header). The scheduler treats it as
+    an uncapped minimum, so a longer provider delay is never shortened by the
+    local backoff cap.
+    """
+
+    def __init__(
+        self, category: str, message: str, retry_after: Optional[float] = None
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.retry_after = retry_after
 
 
 class SourceAdapter(ABC):
@@ -294,6 +305,35 @@ class AntigravityAdapter(SourceAdapter):
 # ---------------------------------------------------------------------------
 
 
+def _retry_after_seconds(headers: Any) -> Optional[float]:
+    """Parse an HTTP ``Retry-After`` header into a non-negative delay.
+
+    Accepts both the delta-seconds and the HTTP-date form. Returns ``None``
+    when the header is absent, unparseable, or already in the past.
+    """
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    value = headers.get("Retry-After")
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        seconds = (parsed - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
 def _openrouter_request(
     url: str,
     headers: dict[str, str],
@@ -305,14 +345,23 @@ def _openrouter_request(
             body = resp.read()
     except urllib.error.HTTPError as exc:
         # HTTPError subclasses URLError, so it must be handled first.
+        retry_after = _retry_after_seconds(getattr(exc, "headers", None))
         if exc.code == 401:
-            raise CollectionError("authentication", "openrouter authentication failed")
+            raise CollectionError(
+                "authentication", "openrouter authentication failed", retry_after
+            )
         if exc.code == 403:
             # Most commonly a non-management key calling /api/v1/credits.
-            raise CollectionError("authorization", "openrouter authorization failed")
+            raise CollectionError(
+                "authorization", "openrouter authorization failed", retry_after
+            )
         if exc.code == 429:
-            raise CollectionError("rate_limited", "openrouter rate limit")
-        raise CollectionError("internal", f"openrouter HTTP {exc.code}")
+            raise CollectionError(
+                "rate_limited", "openrouter rate limit", retry_after
+            )
+        raise CollectionError(
+            "internal", f"openrouter HTTP {exc.code}", retry_after
+        )
     except urllib.error.URLError as exc:
         # Connect-phase timeouts are wrapped in URLError by urllib, so the
         # bare TimeoutError branch below only catches read-phase timeouts.

@@ -451,12 +451,10 @@ class TestUsageWorker:
         while-loop.
 
         Ordering matters: ``_workers`` is built in ``SOURCE_DEFS`` order
-        (codex, antigravity, ...), and ``_run()`` iterates that order. The
-        healthy source (codex) must therefore come FIRST and the crashing
-        source (antigravity) SECOND, so that on the crash cycle codex has
-        already been dispatched. Without the loop guard, antigravity's crash
-        aborts ``_run()`` and the thread dies, freezing codex's poll count;
-        with the guard, codex keeps polling on later cycles.
+        (codex, antigravity, ...) and each source is dispatched on its own
+        attempt thread, so a crash in one source cannot abort the others.
+        The healthy source (codex) keeps polling while the crashing source
+        (antigravity) is isolated.
         """
         poll_counts: dict[str, int] = {"codex": 0, "antigravity": 0}
 
@@ -504,19 +502,18 @@ class TestUsageWorker:
             time.sleep(0.02)
         worker.stop()
 
-        # antigravity's poll crashed on every cycle; the scheduler survived.
-        assert poll_counts["antigravity"] >= 2, (
-            "antigravity should have been re-polled after crashing"
+        # antigravity's poll crashed; the scheduler survived it.
+        assert poll_counts["antigravity"] >= 1, (
+            "antigravity's first attempt should have run and crashed"
         )
-        # codex gets one poll at startup and one in the first loop cycle
-        # *before* antigravity crashes. Without the loop guard the thread dies
-        # on that first crash, so codex would stop at 2. Requiring >= 3 proves
-        # the while-loop survived antigravity's crashes and kept dispatching
-        # codex on later cycles.
+        # codex keeps polling on later cycles, proving the crash was isolated
+        # to antigravity's own attempt thread.
         assert poll_counts["codex"] >= 3, (
-            "codex should have been re-polled on subsequent loop cycles, "
-            "proving the while-loop survived antigravity's crashes"
+            "codex should have been re-polled on subsequent cycles, "
+            "proving a crashing source does not freeze the scheduler"
         )
+        # The crash schedules a backoff instead of retrying on every tick.
+        assert worker._workers["antigravity"]._next_due_at is not None
         assert worker._workers["codex"].status == SourceStatus.SUCCESS
 
 

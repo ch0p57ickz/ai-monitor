@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -29,8 +30,6 @@ if TYPE_CHECKING:  # pragma: no cover
     pass
 
 log = logging.getLogger(__name__)
-
-MAX_RETRY_STREAK = 5
 
 #: Error categories permitted by the widget-usage-api spec for /health.
 _ALLOWED_ERROR_CATEGORIES = frozenset(
@@ -117,11 +116,19 @@ class _SourceWorker:
     _last_polled_at: Optional[float] = None
     _consecutive_failures: int = 0
     _stale_after: int = 3600
+    # Monotonic time at which this source may be polled again. ``None`` means
+    # "immediately" (never polled, or a fresh start).
+    _next_due_at: Optional[float] = None
+    # A poll is currently running for this source. The dispatcher never starts
+    # a second overlapping attempt for the same source.
+    _in_flight: bool = False
+    # Provider-supplied minimum delay (seconds) for the next attempt.
+    _retry_after: Optional[float] = None
 
-    def poll_due(self) -> bool:
-        if self._last_polled_at is None:
+    def poll_due(self, now: Optional[float] = None) -> bool:
+        if self._last_polled_at is None or self._next_due_at is None:
             return True
-        return (time.monotonic() - self._last_polled_at) >= self.source.cadence_seconds
+        return (now if now is not None else time.monotonic()) >= self._next_due_at
 
     def mark_polled(self) -> None:
         self._last_polled_at = time.monotonic()
@@ -169,6 +176,10 @@ class UsageWorker:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._workers: Dict[str, _SourceWorker] = {}
+        # In-flight attempt threads, so ``stop()`` can join them.
+        self._attempts: Dict[str, threading.Thread] = {}
+        # Injectable jitter source, so tests are deterministic.
+        self._random = random.Random()
 
         for source_def in SOURCE_DEFS:
             self._db.upsert_source(source_def)
@@ -255,50 +266,43 @@ class UsageWorker:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="usage-scheduler"
+        )
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        # Attempts run in their own threads so a hung source cannot block the
+        # dispatcher; join them so no work outlives ``stop()``.
+        with self._lock:
+            attempts = list(self._attempts.values())
+        for attempt in attempts:
+            attempt.join(timeout=5)
 
     def _run(self) -> None:
-        # Poll all sources once at startup
-        with self._lock:
-            workers = list(self._workers.values())
-        for worker in workers:
-            try:
-                self._poll_source(worker)
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "initial poll for %s raised an unexpected error",
-                    worker.source.source,
-                )
+        """Dispatcher loop: start each source's attempt when it is due.
 
+        Polling happens on per-source attempt threads. The dispatcher itself
+        never blocks on a provider, so a failing or hung source cannot delay
+        another source, and the ``_in_flight`` flag prevents an overlapping
+        attempt for the same source.
+        """
         last_retention = time.monotonic()
         retention_interval = 86400.0  # run retention at most once per day
 
         while not self._stop.is_set():
+            now_mono = time.monotonic()
             with self._lock:
                 workers = list(self._workers.values())
             for worker in workers:
                 if self._stop.is_set():
                     break
-                if worker.poll_due():
-                    worker.mark_polled()
-                    try:
-                        self._poll_source(worker)
-                    except Exception:  # noqa: BLE001
-                        # A single source must never take down the whole
-                        # scheduler. Log and keep polling the other sources;
-                        # this source's state is left as-is and retried next
-                        # cycle (spec: independent per-source polling).
-                        log.exception(
-                            "poll for %s raised an unexpected error; "
-                            "continuing with other sources",
-                            worker.source.source,
-                        )
+                if worker._in_flight or not worker.poll_due(now_mono):
+                    continue
+                self._dispatch(worker)
 
             # Periodic retention sweep
             now_mono = time.monotonic()
@@ -313,35 +317,127 @@ class UsageWorker:
                 except Exception:  # noqa: BLE001
                     log.exception("retention sweep failed")
 
-            self._stop.wait(timeout=1.0)
+            self._stop.wait(timeout=self._config.scheduler_tick_seconds)
+
+    def _dispatch(self, worker: _SourceWorker) -> None:
+        """Start one attempt for ``worker`` on its own thread."""
+        key = worker.source.source
+        with self._lock:
+            worker._in_flight = True
+            worker.mark_polled()
+            attempt = threading.Thread(
+                target=self._run_attempt, args=(worker,), daemon=True, name=f"poll-{key}"
+            )
+            self._attempts[key] = attempt
+        attempt.start()
+
+    def _run_attempt(self, worker: _SourceWorker) -> None:
+        """Run one attempt and always clear the in-flight flag."""
+        key = worker.source.source
+        try:
+            self._poll_source(worker)
+        except Exception:  # noqa: BLE001
+            # A single source must never take down the scheduler. The attempt
+            # thread is isolated, so other sources keep their own schedules.
+            # ``_poll_source`` normally schedules the next attempt on both the
+            # success and failure paths; if it raised before doing so, apply a
+            # fallback backoff so this source is not retried every tick.
+            log.exception(
+                "poll for %s raised an unexpected error; "
+                "continuing with other sources",
+                key,
+            )
+            with self._lock:
+                if worker._next_due_at is None:
+                    self._schedule_next(worker, "internal")
+        finally:
+            with self._lock:
+                self._attempts.pop(key, None)
+                worker._in_flight = False
+
+    def _attempt(self, worker: _SourceWorker) -> dict[str, Any]:
+        """Run one adapter fetch, bounded by the configured deadline.
+
+        The fetch runs on a helper thread and is abandoned at the deadline, so
+        a hung provider cannot block this source indefinitely. Returns a dict
+        with either ``raw`` or ``category`` (plus ``retry_after`` when the
+        provider requested a delay).
+        """
+        outcome: dict[str, Any] = {}
+        done = threading.Event()
+
+        def fetch() -> None:
+            try:
+                outcome["raw"] = worker.adapter.fetch(self._config)
+            except CollectionError as exc:
+                outcome["category"] = exc.category
+                if getattr(exc, "retry_after", None) is not None:
+                    outcome["retry_after"] = exc.retry_after
+            except Exception:  # noqa: BLE001
+                log.exception("unexpected error polling %s", worker.source.source)
+                outcome["category"] = "unknown"
+            finally:
+                done.set()
+
+        helper = threading.Thread(
+            target=fetch, daemon=True, name=f"fetch-{worker.source.source}"
+        )
+        helper.start()
+        if not done.wait(timeout=self._config.deadline):
+            log.warning(
+                "source %s: attempt exceeded the %.0fs deadline",
+                worker.source.source,
+                self._config.deadline,
+            )
+            return {"category": "timeout"}
+        return outcome
+
+    def _next_delay(self, worker: _SourceWorker, category: Optional[str]) -> float:
+        """Delay before the next attempt for this source.
+
+        Success waits the source cadence. A transient failure waits a capped
+        exponential backoff with jitter. An operator-action failure (401/403
+        or missing configuration) waits the maximum delay, so the service does
+        not enter a rapid retry loop. A provider ``Retry-After`` is applied as
+        an uncapped minimum: it is never shortened by the local cap.
+        """
+        config = self._config
+        if category is None:
+            delay = worker.source.cadence_seconds
+        elif category in _OPERATOR_ACTION_CATEGORIES:
+            delay = config.retry_max_delay
+        else:
+            exponent = max(0, worker._consecutive_failures - 1)
+            delay = min(
+                config.retry_max_delay,
+                config.retry_base_delay * (config.retry_backoff_factor**exponent),
+            )
+            # Jitter only shrinks the local backoff, within [1-jitter, 1].
+            jitter = config.retry_jitter
+            if jitter > 0:
+                delay *= 1.0 - jitter * self._random.random()
+        if worker._retry_after is not None:
+            # Uncapped: the local backoff cap never shortens the provider delay.
+            delay = max(delay, worker._retry_after)
+        return max(0.0, delay)
+
+    def _schedule_next(self, worker: _SourceWorker, category: Optional[str]) -> None:
+        worker._next_due_at = time.monotonic() + self._next_delay(worker, category)
 
     def _poll_source(self, worker: _SourceWorker) -> None:
-        """Poll one source. Updates worker state and DB."""
+        """Poll one source. Updates worker state, DB, and the next due time."""
         now = _now_iso()
         worker._last_polled_at = time.monotonic()
-
-        # Backoff gate: after MAX_RETRY_STREAK consecutive failures, reset the
-        # streak so the next poll attempt is made (capped retry, not permanent).
-        if worker._consecutive_failures >= MAX_RETRY_STREAK:
-            log.debug(
-                "source %s: retrying after %d consecutive failures",
-                worker.source.source,
-                worker._consecutive_failures,
-            )
-            worker._consecutive_failures = 0
+        worker._retry_after = None
 
         with self._lock:
             worker.last_attempt = now
 
-        raw: dict[str, Any] | None = None
-        error_category: str | None = None
-        try:
-            raw = worker.adapter.fetch(self._config)
-        except CollectionError as exc:
-            error_category = exc.category
-        except Exception as exc:  # noqa: BLE001
-            log.exception("unexpected error polling %s", worker.source.source)
-            error_category = "unknown"
+        outcome = self._attempt(worker)
+        raw: dict[str, Any] | None = outcome.get("raw")
+        error_category: str | None = outcome.get("category")
+        if outcome.get("retry_after") is not None:
+            worker._retry_after = outcome["retry_after"]
 
         if error_category is not None and raw is None:
             with self._lock:
@@ -354,6 +450,7 @@ class UsageWorker:
                 error_category,
                 worker._consecutive_failures,
             )
+            self._schedule_next(worker, error_category)
             return
 
         # Normalize
@@ -391,6 +488,7 @@ class UsageWorker:
             worker.status = obs.status
             worker.last_error_category = None
             worker._consecutive_failures = 0
+        self._schedule_next(worker, None)
 
     # ------------------------------------------------------------------
     # Pace history
