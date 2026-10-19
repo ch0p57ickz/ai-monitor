@@ -23,16 +23,17 @@ approval. Treat the steps as reviewed-but-unexecuted until the first install.
 ## Verify the service locally (no install)
 
 ```sh
-# Contract smoke check on the loopback port with a temporary data directory.
-python3 -c 'import sys; sys.path.insert(0, ".")'   # run from the checkout
-python3 /tmp/opencode/smoke.py
+# From the repository root. Starts the service on a loopback port with a
+# temporary data directory, uses the real adapters, and exercises the HTTP
+# contract. Exits non-zero if a check fails.
+python3 tools/smoke_check.py
 ```
 
 The smoke check asserts: `/health` lists all four source IDs, `/api/v1/usage`
 returns `observations: []` before any source succeeds, history reports `hours`
 and `truncated`, every response is `Cache-Control: private, no-store`, no
-response contains credential-looking text, and a non-loopback address cannot
-reach the port.
+response contains credential-looking text, responses stay fast while providers
+fail, and a non-loopback address cannot reach the port.
 
 ## Install (task 5.2, first time)
 

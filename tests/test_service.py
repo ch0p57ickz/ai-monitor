@@ -31,7 +31,7 @@ from ai_monitor.sources.registry import (
     build_registry,
     default_registry,
 )
-from ai_monitor.state import UsageWorker, _SourceWorker
+from ai_monitor.state import ResponseTooLarge, UsageWorker, _SourceWorker
 from conftest import FakeSourceAdapter
 
 CODEX = get_source_def("codex")
@@ -800,6 +800,110 @@ class TestHttpApiContract:
             status, data, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
         assert status == 413
         assert data["error"]["category"] == "response_too_large"
+
+    def test_history_returns_413_when_one_observation_exceeds_the_cap(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """Spec: if one observation alone exceeds the cap, return 413.
+
+        Regression: the endpoint used to drop every row and return 200 with an
+        empty list, hiding the fact that the request could not be satisfied.
+        """
+        tiny = dataclasses.replace(sample_config, response_cap_bytes=1024)
+        big = {
+            "status": "success",
+            "quota_windows": [
+                {"id": f"w{i}", "label": "x" * 60, "used_percent": 1.0} for i in range(100)
+            ],
+        }
+        with _serve(tiny, sample_db, {"codex": _ok(big)}) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            status, data, _ = _get(
+                f"http://127.0.0.1:{srv.port}/api/v1/usage/history?hours=1&limit=5"
+            )
+        assert status == 413
+        assert data["error"]["category"] == "response_too_large"
+
+    def test_history_trims_oldest_rows_but_keeps_the_newest(
+        self, sample_config: Config, sample_db: Database
+    ):
+        worker = UsageWorker(config=sample_config, db=sample_db, version="t")
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        for index in range(3):
+            obs = normalize_observation(
+                source,
+                {
+                    "status": "success",
+                    "quota_windows": [
+                        {"id": f"w{index}-{n}", "label": "y" * 40, "used_percent": 1.0}
+                        for n in range(20)
+                    ],
+                },
+            )
+            stamp = datetime.now(UTC) - timedelta(minutes=index)
+            obs.collected_at = stamp.replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            )
+            sample_db.insert_observation(source, obs)
+
+        full = worker.history_payload(hours=24, limit=100)
+        assert len(full["observations"]) == 3
+        newest = full["observations"][-1]["collectedAt"]
+
+        one = {**full, "observations": full["observations"][-1:]}
+        cap = len(json.dumps(one).encode("utf-8")) + 2
+
+        trimmed = worker.history_payload(hours=24, limit=100, max_bytes=cap)
+        assert trimmed["truncated"] is True
+        assert len(trimmed["observations"]) == 1
+        assert trimmed["observations"][0]["collectedAt"] == newest
+        assert cap < len(json.dumps(full).encode("utf-8"))
+
+    def test_history_raises_when_even_metadata_exceeds_the_cap(
+        self, sample_config: Config, sample_db: Database
+    ):
+        worker = UsageWorker(config=sample_config, db=sample_db, version="t")
+        with pytest.raises(ResponseTooLarge):
+            worker.history_payload(hours=24, limit=100, max_bytes=10)
+
+    def test_configured_pace_tolerance_is_used(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """Regression: the validated ``pace_tolerance`` was never applied.
+
+        A window that is 30 of 60 minutes elapsed expects 50% usage; 62% is
+        ``over`` at the 5pp default and ``at`` with a 20pp tolerance.
+        """
+
+        class Adapter(SourceAdapter):
+            def fetch(self, config):
+                return {
+                    "status": "success",
+                    "quota_windows": [
+                        {
+                            "id": "w",
+                            "used_percent": 62.0,
+                            "resetsInSeconds": 1800,
+                            "duration_minutes": 60,
+                        }
+                    ],
+                }
+
+        def classification(tolerance: float) -> str:
+            worker = UsageWorker(
+                config=dataclasses.replace(sample_config, pace_tolerance=tolerance),
+                db=sample_db,
+                registry={"codex": Adapter},
+            )
+            assert worker._pace_settings.tolerance_percent == tolerance
+            worker._poll_source(worker._workers["codex"])
+            return worker._workers["codex"].last_observation.quota_windows[0].pace[
+                "classification"
+            ]
+
+        assert classification(5.0) == "over"
+        assert classification(20.0) == "at"
 
     def test_server_rejects_non_loopback_binding(self, sample_config: Config, sample_db: Database):
         worker = UsageWorker(config=sample_config, db=sample_db, version="t")

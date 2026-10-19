@@ -96,6 +96,21 @@ def _iso_plus_seconds(timestamp: str, seconds: float) -> Optional[str]:
     )
 
 
+def _encoded_size(payload: Any) -> int:
+    """Serialized size of a payload in bytes, as sent over HTTP."""
+    return len(json.dumps(payload).encode("utf-8"))
+
+
+class ResponseTooLarge(Exception):
+    """A payload cannot be returned within the configured byte cap.
+
+    Raised by ``history_payload`` when even a single observation exceeds the
+    cap; the HTTP layer maps it to 413 ``response_too_large``
+    (widget-usage-api spec: "if one observation alone exceeds that cap, the
+    service SHALL return ``response_too_large``").
+    """
+
+
 # Error categories that require operator action: the service must not keep
 # retrying aggressively; an operator needs to fix the credential or
 # configuration first.
@@ -171,7 +186,7 @@ class UsageWorker:
         self._db = db
         self._version = version
         self._registry = registry or default_registry()
-        self._pace_settings = PaceSettings()
+        self._pace_settings = PaceSettings(tolerance_percent=config.pace_tolerance)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -276,11 +291,14 @@ class UsageWorker:
         if self._thread:
             self._thread.join(timeout=5)
         # Attempts run in their own threads so a hung source cannot block the
-        # dispatcher; join them so no work outlives ``stop()``.
+        # dispatcher; join them so no work outlives ``stop()``. An attempt can
+        # legitimately take up to ``deadline``, so allow for that (and for the
+        # helper thread it abandons) before giving up.
+        join_timeout = max(5.0, self._config.deadline + 5.0)
         with self._lock:
             attempts = list(self._attempts.values())
         for attempt in attempts:
-            attempt.join(timeout=5)
+            attempt.join(timeout=join_timeout)
 
     def _run(self) -> None:
         """Dispatcher loop: start each source's attempt when it is due.
@@ -323,13 +341,20 @@ class UsageWorker:
         """Start one attempt for ``worker`` on its own thread."""
         key = worker.source.source
         with self._lock:
-            worker._in_flight = True
             worker.mark_polled()
             attempt = threading.Thread(
                 target=self._run_attempt, args=(worker,), daemon=True, name=f"poll-{key}"
             )
+            try:
+                attempt.start()
+            except Exception:  # noqa: BLE001 - a failed start must not latch state
+                log.exception("could not start an attempt thread for %s", key)
+                self._schedule_next(worker, "internal")
+                return
+            # Only mark in-flight once the thread really started; otherwise the
+            # source would never be polled again.
+            worker._in_flight = True
             self._attempts[key] = attempt
-        attempt.start()
 
     def _run_attempt(self, worker: _SourceWorker) -> None:
         """Run one attempt and always clear the in-flight flag."""
@@ -725,8 +750,10 @@ class UsageWorker:
         Rows are returned in ascending ``collectedAt`` order. ``truncated`` is
         True when matching records were omitted by the count bound *or* the
         byte bound. When ``max_bytes`` is given, the oldest observations are
-        dropped until the serialized payload fits, so the endpoint degrades
-        gracefully instead of returning ``response_too_large``.
+        dropped until the serialized payload fits (always keeping the newest
+        one), so the endpoint degrades gracefully. If a single observation
+        still exceeds the cap, :class:`ResponseTooLarge` is raised and the HTTP
+        layer returns ``response_too_large``.
         """
         now_iso = _now_iso()
         try:
@@ -766,10 +793,16 @@ class UsageWorker:
             "observations": observations,
         }
         if max_bytes is not None:
-            # Drop the oldest observations (list is ascending) until it fits.
-            while observations and len(json.dumps(payload).encode("utf-8")) > max_bytes:
+            # Drop the oldest observations (list is ascending) until the
+            # payload fits, always keeping the newest one: a widget should
+            # still get the most recent reading when older rows are too large.
+            while len(observations) > 1 and _encoded_size(payload) > max_bytes:
                 observations.pop(0)
                 payload["truncated"] = True
+            if _encoded_size(payload) > max_bytes:
+                # Even a single observation (or the metadata alone) exceeds the
+                # cap, so the endpoint cannot satisfy the request in-bounds.
+                raise ResponseTooLarge()
         return payload
 
     def _stale_after_for(self, source_id: str) -> float:

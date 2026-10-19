@@ -14,6 +14,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 from .models import utc_now_iso
+from .state import ResponseTooLarge
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import Config
@@ -174,6 +175,11 @@ class _UsageRequestHandler(BaseHTTPRequestHandler):
                 payload = worker.history_payload(
                     hours=hours, limit=limit, max_bytes=self._cap
                 )
+            except ResponseTooLarge:
+                self._send_error(
+                    413, "response_too_large", "response exceeds the configured size cap"
+                )
+                return
             except Exception:  # noqa: BLE001
                 log.exception("history query failed")
                 self._send_error(503, "storage_unavailable", "history is temporarily unavailable")

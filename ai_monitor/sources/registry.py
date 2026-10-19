@@ -52,13 +52,6 @@ class SourceAdapter(ABC):
         raise NotImplementedError
 
 
-class UnavailableAdapter(SourceAdapter):
-    """Placeholder adapter for sources not yet wired."""
-
-    def fetch(self, config: "Config") -> dict[str, Any]:
-        raise CollectionError("unavailable", "source adapter not implemented")
-
-
 # ---------------------------------------------------------------------------
 # Antigravity (agy CLI, version-sensitive, session-scoped)
 # ---------------------------------------------------------------------------
