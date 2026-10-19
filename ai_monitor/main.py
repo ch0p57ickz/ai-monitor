@@ -14,7 +14,7 @@ from ai_monitor import __version__
 from ai_monitor.config import Config, ConfigError, load_config
 from ai_monitor.db import Database
 from ai_monitor.http import serve_http
-from ai_monitor.redact import install_redaction
+from ai_monitor.redact import install_redaction, register_config_secrets
 from ai_monitor.sources.registry import default_registry
 from ai_monitor.state import UsageWorker
 
@@ -71,6 +71,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         LOG.error("config error: %s", exc)
         return 2
+
+    # Register the configured credentials for exact masking. The shape patterns
+    # catch what looks like a secret; this catches the actual secrets, whatever
+    # their shape, before any of them can reach a log line or a payload.
+    register_config_secrets(config)
 
     db_path = args.db or str(Path(config.data_dir) / "usage.db")
     Path(config.data_dir).mkdir(parents=True, exist_ok=True)

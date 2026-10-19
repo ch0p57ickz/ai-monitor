@@ -246,6 +246,40 @@ possible source of a served observation is the restored database. The served
 `collectedAt` must match a restored row. With the restore disabled the check now
 fails on three counts and exits 1.
 
+### Finding: a provider could smuggle a configured credential into the database
+
+The spec is unconditional: credentials "SHALL NOT appear in HTTP responses or
+logs" (`gx10-service-access`), and successful observations "SHALL NOT persist
+credentials" (`usage-snapshots`). Redaction was heuristic — it masks *shapes*
+(`sk-…` keys, bearer tokens, emails, opaque strings) and its own docstring
+records that an unkeyed 32+ character alphabetic run passes through, because that
+shape is indistinguishable from a file path.
+
+That is fine for diagnostics, but a heuristic cannot carry an unconditional
+guarantee, and `normalize_observation` — the single point where provider data
+becomes a stored observation — redacted only `notes`. Everything else the
+provider chose went in untouched. Reproduced with a local stand-in for
+`/api/v1/key` that echoes the configured key back in `limit_reset_at`:
+
+```
+canary A in observation payload: True      ← served by /api/v1/usage
+canary A persisted in SQLite:    True      ← and durable
+```
+
+The same value reaches a widget payload. Both mechanisms are now in place:
+
+- configured credentials (`openrouter_api_key`, `openrouter_management_key`,
+  `account_digest_key`) are **registered** and masked by exact match, which does
+  not depend on guessing the shape;
+- `normalize_observation` redacts provider-controlled text (`label`, `group`,
+  `model`, `scope`, and the reset timestamps) on the way in.
+
+Identifiers are masked exactly, never heuristically: the redactor masks our own
+64-character hex account digest, so applying the heuristic to `account_id` or a
+window id would turn every account into the same `[redacted]` and merge unrelated
+buckets. `tests/test_secret_masking.py` pins that, and re-running the stand-in now
+shows the value masked in the payload and in SQLite.
+
 Still outstanding for 5.2 and 5.4, all needing the host:
 
 - installing the unit and confirming it starts under systemd;

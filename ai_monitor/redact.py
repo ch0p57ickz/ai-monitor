@@ -10,6 +10,12 @@ line or a persisted ``notes`` field goes through these helpers first:
 - ``RedactingFilter`` is a logging filter that redacts every log record, so a
   stray ``log.info("... %s", payload)`` cannot leak a secret.
 
+The shape patterns are a heuristic, and a deliberately conservative one: a
+credential whose shape they do not recognise would pass through. Configured
+credentials are therefore also *registered* (``register_secret``) and masked by
+exact match, which does not depend on guessing. ``main()`` registers everything
+the loaded configuration holds.
+
 The helpers never log or return the original value, and they are deliberately
 conservative: when in doubt, replace with ``[redacted]``.
 """
@@ -18,13 +24,18 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any
 
 __all__ = [
     "REDACTED",
     "MAX_DIAGNOSTIC_CHARS",
+    "MIN_REGISTERED_SECRET_CHARS",
     "redact_text",
     "redact_value",
+    "mask_secrets",
+    "register_secret",
+    "register_config_secrets",
     "RedactingFilter",
     "install_redaction",
 ]
@@ -34,6 +45,18 @@ REDACTED = "[redacted]"
 
 #: Upper bound for a diagnostic string. A "full payload" is never logged.
 MAX_DIAGNOSTIC_CHARS = 200
+
+#: Shortest value worth masking exactly. Below this, a "credential" is more
+#: likely to be an ordinary short string that masking would mangle.
+MIN_REGISTERED_SECRET_CHARS = 8
+
+#: Configured credentials, masked by exact match. The patterns above catch
+#: *shapes* and deliberately let some through — an unkeyed 32+ character
+#: alphabetic run is indistinguishable from a file path — so a credential whose
+#: shape they miss would otherwise survive. Registration closes that gap and is
+#: the only mechanism that does not depend on guessing.
+_REGISTERED_SECRETS: set[str] = set()
+_REGISTERED_LOCK = threading.Lock()
 
 #: ``key=value`` / ``key: value`` forms for credential-ish field names. The
 #: field name may be quoted (JSON) and may carry prefixes/suffixes
@@ -70,6 +93,67 @@ _OPAQUE_RE = re.compile(
 )
 
 
+def register_secret(value: Any) -> bool:
+    """Register an exact credential value. Returns whether it was registered.
+
+    Convention is registered, never removed: the value must stay masked for the
+    life of the process, and a rotation is a restart.
+    """
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if len(value) < MIN_REGISTERED_SECRET_CHARS:
+        return False
+    with _REGISTERED_LOCK:
+        _REGISTERED_SECRETS.add(value)
+    return True
+
+
+def register_config_secrets(config: Any) -> int:
+    """Register every credential a ``Config`` holds. Returns how many registered.
+
+    Takes any object so this module needs no import of the configuration type.
+    """
+    registered = 0
+    for name in (
+        "openrouter_api_key",
+        "openrouter_management_key",
+        "account_digest_key",
+    ):
+        if register_secret(getattr(config, name, None)):
+            registered += 1
+    return registered
+
+
+def _clear_registered_secrets() -> None:
+    """Drop every registered secret. For tests, which must not leak into each
+    other through process-global state."""
+    with _REGISTERED_LOCK:
+        _REGISTERED_SECRETS.clear()
+
+
+def registered_secrets() -> tuple[str, ...]:
+    """Registered credentials, longest first so a prefix cannot mask a suffix."""
+    with _REGISTERED_LOCK:
+        return tuple(sorted(_REGISTERED_SECRETS, key=len, reverse=True))
+
+
+def mask_secrets(text: Any) -> str:
+    """Mask registered credentials, and nothing else.
+
+    Use this where a value is an identifier rather than free text: the
+    heuristic rules also mask opaque strings, so applying them to, say, an
+    account digest would collapse every account into one identity. Exact
+    matching removes only the credential that is actually configured.
+    """
+    if text is None:
+        return ""
+    value = text if isinstance(text, str) else str(text)
+    for secret in registered_secrets():
+        value = value.replace(secret, REDACTED)
+    return value
+
+
 def redact_text(
     text: Any,
     limit: int = MAX_DIAGNOSTIC_CHARS,
@@ -92,6 +176,9 @@ def redact_text(
     value = text if isinstance(text, str) else str(text)
     if collapse_whitespace:
         value = " ".join(value.split())
+    # Registered credentials first: exact matches are certain, and masking them
+    # before the patterns keeps a credential from being partially rewritten.
+    value = mask_secrets(value)
     # Order matters: mask bearer tokens first, so an
     # ``Authorization: Bearer <token>`` line cannot leave the token behind
     # after the field-name rule consumes only the word "Bearer".

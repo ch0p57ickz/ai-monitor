@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from .redact import redact_value
+from .redact import mask_secrets, redact_text, redact_value
 
 
 def utc_now_iso() -> str:
@@ -225,6 +225,13 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
         }
 
     Unknown values remain ``None`` — never inferred zeros or full marks.
+
+    This is also the single choke point for provider text: ``label``, ``group``,
+    ``model``, ``scope`` and the reset timestamps come from the payload and are
+    redacted before they can be stored or served, and a provider-derived
+    identifier gets its configured credentials masked exactly. ``account_id`` is
+    left alone because it is our own digest, and the heuristic redactor would
+    flatten every account into one identity.
     """
     status_str = raw.get("status", "error")
     if status_str == "success":
@@ -238,15 +245,15 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
     quota_windows: list[QuotaWindow] = []
     for w in raw.get("quota_windows") or []:
         quota_windows.append(QuotaWindow(
-            id=w.get("id", ""),
-            label=w.get("label"),
-            scope=w.get("scope"),
-            group=w.get("group"),
-            model=w.get("model"),
+            id=_provider_id(w.get("id", "")),
+            label=_provider_text(w.get("label")),
+            scope=_provider_text(w.get("scope")),
+            group=_provider_text(w.get("group")),
+            model=_provider_text(w.get("model")),
             used_percent=_to_float(w.get("used_percent")),
             remaining_percent=_to_float(w.get("remaining_percent")),
             duration_minutes=_to_float(w.get("duration_minutes")),
-            resets_at=w.get("resets_at"),
+            resets_at=_provider_text(w.get("resets_at")),
             pace=w.get("pace") or unknown_pace(),
         ))
 
@@ -254,14 +261,14 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
     budgets: list[Budget] = []
     for b in raw.get("budgets") or []:
         budgets.append(Budget(
-            id=b.get("id", ""),
-            scope=b.get("scope", "account"),
+            id=_provider_id(b.get("id", "")),
+            scope=_provider_text(b.get("scope", "account")),
             total_credits_usd=_to_float(b.get("total_credits_usd")),
             total_usage_usd=_to_float(b.get("total_usage_usd")),
             remaining_usd=_to_float(b.get("remaining_usd")),
             limit_usd=_to_float(b.get("limit_usd")),
             used_usd=_to_float(b.get("used_usd")),
-            resets_at=b.get("resets_at"),
+            resets_at=_provider_text(b.get("resets_at")),
             pace=b.get("pace") or unknown_pace(),
         ))
 
@@ -287,6 +294,32 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
         # single choke point (no credentials, tokens, emails, or full payloads).
         notes=redact_value(raw.get("notes")) if raw.get("notes") else None,
     )
+
+
+def _provider_text(value: Any) -> Any:
+    """Redact provider-supplied display text before it is persisted.
+
+    Provider payloads are untrusted input that ends up in the database and in
+    HTTP responses, and the spec is unconditional: neither may carry a
+    credential. The fields below are free text or timestamps a provider chose,
+    so they are run through the redactor at this single choke point.
+    """
+    if value is None:
+        return None
+    return redact_text(value)
+
+
+def _provider_id(value: Any) -> Any:
+    """Mask configured credentials in a provider-derived identifier.
+
+    Exact matches only. The heuristic rules also mask opaque strings, and these
+    identifiers key window and budget identity: applying them here would turn
+    two distinct 64-character hex ids into the same ``[redacted]`` and merge
+    unrelated buckets.
+    """
+    if value is None:
+        return None
+    return mask_secrets(value)
 
 
 def _to_float(value: Any) -> float | None:

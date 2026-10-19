@@ -213,9 +213,11 @@ curl -s http://127.0.0.1:8732/health | python3 -m json.tool
 curl -s http://127.0.0.1:8732/api/v1/version
 ```
 
-The log filter redacts credentials, tokens, email addresses, and opaque
-session strings. A credential must never appear in `journalctl` output or in a
-response body:
+The log filter redacts credentials, tokens, email addresses, and opaque session
+strings, and it masks every credential the loaded configuration holds by exact
+match — the shape patterns alone are a heuristic and cannot carry the spec's
+unconditional "no credentials in logs or responses". A credential must never
+appear in `journalctl` output or in a response body:
 
 ```sh
 journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'

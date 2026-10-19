@@ -27,6 +27,20 @@ from ai_monitor.sources.registry import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_registered_secrets():
+    """Registered credentials are process-global; keep them per test.
+
+    A test that registers a canary would otherwise change how every later test in
+    the session is redacted.
+    """
+    from ai_monitor.redact import _clear_registered_secrets
+
+    _clear_registered_secrets()
+    yield
+    _clear_registered_secrets()
+
+
 @pytest.fixture
 def sample_config(tmp_path: Path) -> Config:
     return Config(data_dir=str(tmp_path / "data"), api_port=0)
