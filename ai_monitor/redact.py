@@ -142,9 +142,10 @@ def mask_secrets(text: Any) -> str:
     """Mask registered credentials, and nothing else.
 
     Use this where a value is an identifier rather than free text: the
-    heuristic rules also mask opaque strings, so applying them to, say, an
-    account digest would collapse every account into one identity. Exact
-    matching removes only the credential that is actually configured.
+    heuristic rules also mask any 32+ character opaque string, which is exactly
+    the shape of an account digest, so applying them to an identifier would
+    collapse every account into one identity. Exact matching removes only the
+    credential that is actually configured.
     """
     if text is None:
         return ""

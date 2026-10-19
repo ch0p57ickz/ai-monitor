@@ -229,9 +229,10 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
     This is also the single choke point for provider text: ``label``, ``group``,
     ``model``, ``scope`` and the reset timestamps come from the payload and are
     redacted before they can be stored or served, and a provider-derived
-    identifier gets its configured credentials masked exactly. ``account_id`` is
-    left alone because it is our own digest, and the heuristic redactor would
-    flatten every account into one identity.
+    identifier gets its configured credentials masked exactly. Identifiers are
+    never redacted heuristically: the redactor masks a 32-character hex digest
+    outright, which is exactly the shape of ``account_id``, so the heuristic
+    would flatten every account into one identity.
     """
     status_str = raw.get("status", "error")
     if status_str == "success":
@@ -254,7 +255,7 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
             remaining_percent=_to_float(w.get("remaining_percent")),
             duration_minutes=_to_float(w.get("duration_minutes")),
             resets_at=_provider_text(w.get("resets_at")),
-            pace=w.get("pace") or unknown_pace(),
+            pace=redact_value(w.get("pace")) or unknown_pace(),
         ))
 
     # Parse budgets.
@@ -269,7 +270,7 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
             limit_usd=_to_float(b.get("limit_usd")),
             used_usd=_to_float(b.get("used_usd")),
             resets_at=_provider_text(b.get("resets_at")),
-            pace=b.get("pace") or unknown_pace(),
+            pace=redact_value(b.get("pace")) or unknown_pace(),
         ))
 
     # Parse error category.
@@ -284,8 +285,10 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
         source=source.source,
         provider=source.provider,
         collected_at=utc_now_iso(),
-        observed_at=raw.get("observed_at"),
-        account_id=raw.get("account_id"),
+        observed_at=_provider_text(raw.get("observed_at")),
+        # Exact masking only: this is the opaque account digest, and the
+        # heuristic redactor masks a 32-character hex digest outright.
+        account_id=_provider_id(raw.get("account_id")),
         status=status,
         quota_windows=quota_windows,
         budgets=budgets,

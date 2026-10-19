@@ -22,6 +22,7 @@ import pytest
 
 from ai_monitor.config import Config
 from ai_monitor.db import Database
+from ai_monitor.identity import derive_account_id
 from ai_monitor.models import get_source_def, normalize_observation
 from ai_monitor.pace import PaceSettings, enrich_observation
 from ai_monitor.redact import (
@@ -170,27 +171,62 @@ class TestNormalizedObservationIsRedacted:
         assert observation.budgets[0].resets_at == "2026-10-20T01:00:00Z"
 
     def test_distinct_opaque_window_ids_are_not_merged(self):
-        """A digest-shaped id must survive, or unrelated buckets collapse."""
+        """A digest-shaped id must survive, or unrelated buckets collapse.
+
+        The ids are the real digest shape (32 hex characters), which is exactly
+        the boundary of the heuristic's opaque-string rule.
+        """
         register_secret(PLAIN_SECRET)
-        first = _observation(None, window_id="a1b2c3d4" * 8)
-        second = _observation(None, window_id="deadbeef" * 8)
-        assert first.quota_windows[0].id == "a1b2c3d4" * 8
-        assert second.quota_windows[0].id == "deadbeef" * 8
-        assert first.quota_windows[0].id != second.quota_windows[0].id
+        first_id = derive_account_id("codex", "user-one", "k" * 32)
+        second_id = derive_account_id("codex", "user-two", "k" * 32)
+        assert first_id != second_id and len(first_id) == 32
+        assert redact_text(first_id) == REDACTED, "the heuristic does mask this shape"
+        first = _observation(None, window_id=first_id)
+        second = _observation(None, window_id=second_id)
+        assert first.quota_windows[0].id == first_id
+        assert second.quota_windows[0].id == second_id
 
     def test_a_credential_in_a_window_id_is_masked_exactly(self):
         register_secret(VENDOR_KEY)
         observation = _observation(None, window_id=f"antigravity:{VENDOR_KEY}")
         assert observation.quota_windows[0].id == f"antigravity:{REDACTED}"
 
-    def test_account_id_is_never_masked(self):
+    def test_account_id_is_not_redacted_heuristically(self):
         """It is our own digest; the heuristic would flatten every account."""
         register_secret(PLAIN_SECRET)
-        digest = "a1b2c3d4" * 8
+        digest = derive_account_id("codex", "user-one", "k" * 32)
+        assert redact_text(digest) == REDACTED
         source = get_source_def("codex")
         raw = {"status": "success", "account_id": digest, "quota_windows": [], "budgets": []}
         observation = normalize_observation(source, raw)
         assert observation.account_id == digest
+
+    def test_a_credential_in_a_raw_account_id_is_masked_exactly(self):
+        """An adapter must not be able to persist a credential as the identity."""
+        register_secret(VENDOR_KEY)
+        source = get_source_def("codex")
+        raw = {
+            "status": "success",
+            "account_id": f"team-{VENDOR_KEY}",
+            "quota_windows": [],
+            "budgets": [],
+        }
+        observation = normalize_observation(source, raw)
+        assert VENDOR_KEY not in (observation.account_id or "")
+        assert observation.account_id == f"team-{REDACTED}"
+
+    def test_a_credential_in_observed_at_is_masked(self):
+        """``observed_at`` is provider-supplied too."""
+        register_secret(VENDOR_KEY)
+        source = get_source_def("codex")
+        raw = {
+            "status": "success",
+            "observed_at": VENDOR_KEY,
+            "quota_windows": [],
+            "budgets": [],
+        }
+        observation = normalize_observation(source, raw)
+        assert observation.observed_at == REDACTED
 
 
 class TestProviderCannotSmuggleACredential:
@@ -223,7 +259,15 @@ class TestProviderCannotSmuggleACredential:
         assert REDACTED in blob, "the value should be masked, not dropped"
 
     def test_an_unregistered_credential_shape_is_out_of_scope(self, tmp_path):
-        """Documents the boundary: registration is what makes it airtight."""
+        """Documents the boundary: registration is what makes it airtight.
+
+        This asserts that an *unregistered* credential of a shape the patterns
+        miss is persisted. It is deliberately a statement about the boundary,
+        not a licence: every credential the configuration holds is registered by
+        ``main()``, so the deployed service cannot reach this case. If the
+        heuristic later grows to cover this shape, this test should be updated
+        rather than kept as-is.
+        """
         _, db_path = self._persist(tmp_path, PLAIN_SECRET)
         connection = sqlite3.connect(db_path)
         try:
@@ -284,14 +328,22 @@ class TestEntryPointRegisters:
 
         saved = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
 
-        def stop_soon() -> None:
-            time.sleep(2.0)
-            os.kill(os.getpid(), signal.SIGTERM)
+        stop = threading.Event()
 
-        threading.Thread(target=stop_soon, daemon=True).start()
+        def stop_soon() -> None:
+            # If main() returns early (a failure before shutdown), the event is
+            # set and no signal is sent: a stray SIGTERM arriving two seconds
+            # later would kill the pytest process during a later test.
+            if not stop.wait(timeout=2.0):
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        thread = threading.Thread(target=stop_soon, daemon=True)
+        thread.start()
         try:
             exit_code = main_module.main(["--config", str(config_path), "--verbose"])
         finally:
+            stop.set()
+            thread.join(timeout=5.0)
             for sig, handler in saved.items():
                 signal.signal(sig, handler)
 

@@ -275,7 +275,7 @@ The same value reaches a widget payload. Both mechanisms are now in place:
   `model`, `scope`, and the reset timestamps) on the way in.
 
 Identifiers are masked exactly, never heuristically: the redactor masks our own
-64-character hex account digest, so applying the heuristic to `account_id` or a
+32-character hex account digest, so applying the heuristic to `account_id` or a
 window id would turn every account into the same `[redacted]` and merge unrelated
 buckets. `tests/test_secret_masking.py` pins that, and re-running the stand-in now
 shows the value masked in the payload and in SQLite.
