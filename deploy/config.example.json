@@ -24,6 +24,8 @@
   "openrouter_api_key": "",
   "openrouter_management_key": "",
 
+  "account_digest_key": "",
+
   "retention_days": 30,
   "history_default_hours": 24,
   "history_max_hours": 168,

@@ -280,6 +280,15 @@ class UsageWorker:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        if not self._config.account_digest_key:
+            # Account-scoped trends (same-account pace, spend deltas) need an
+            # opaque account identifier, which cannot be derived without a
+            # digest key. Warn once so an inert feature is visible rather than
+            # silently reported as a null account id.
+            log.warning(
+                "account_digest_key is not set: provider account ids will be null "
+                "and account-scoped trends are disabled"
+            )
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="usage-scheduler"
@@ -293,8 +302,10 @@ class UsageWorker:
         # Attempts run in their own threads so a hung source cannot block the
         # dispatcher; join them so no work outlives ``stop()``. An attempt can
         # legitimately take up to ``deadline``, so allow for that (and for the
-        # helper thread it abandons) before giving up.
-        join_timeout = max(5.0, self._config.deadline + 5.0)
+        # helper thread it abandons) before giving up. Cap the wait: a service
+        # manager will SIGKILL long before a multi-minute join completes, which
+        # would skip the ``db.close()`` this is meant to protect.
+        join_timeout = min(self._config.deadline + 5.0, 60.0)
         with self._lock:
             attempts = list(self._attempts.values())
         for attempt in attempts:
@@ -793,16 +804,37 @@ class UsageWorker:
             "observations": observations,
         }
         if max_bytes is not None:
-            # Drop the oldest observations (list is ascending) until the
-            # payload fits, always keeping the newest one: a widget should
-            # still get the most recent reading when older rows are too large.
-            while len(observations) > 1 and _encoded_size(payload) > max_bytes:
-                observations.pop(0)
-                payload["truncated"] = True
-            if _encoded_size(payload) > max_bytes:
-                # Even a single observation (or the metadata alone) exceeds the
-                # cap, so the endpoint cannot satisfy the request in-bounds.
+            if _encoded_size(payload) <= max_bytes:
+                return payload
+            if not observations:
+                # The metadata alone exceeds the cap, so even an empty history
+                # cannot be served in-bounds.
                 raise ResponseTooLarge()
+            # Keep the largest suffix (the newest observations) that fits the
+            # cap, always at least the newest one: a widget should still get the
+            # most recent reading when older rows are too large. The list is
+            # ascending and the serialized size grows monotonically with the
+            # count, so binary search avoids re-serializing the whole payload
+            # once per dropped row.
+            low, high, keep = 1, len(observations), None
+            while low <= high:
+                mid = (low + high) // 2
+                candidate = {
+                    **payload,
+                    "truncated": True,
+                    "observations": observations[-mid:],
+                }
+                if _encoded_size(candidate) <= max_bytes:
+                    keep = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            if keep is None:
+                # A single observation alone exceeds the cap, so the endpoint
+                # cannot satisfy the request in-bounds.
+                raise ResponseTooLarge()
+            payload["truncated"] = True
+            payload["observations"] = observations[-keep:]
         return payload
 
     def _stale_after_for(self, source_id: str) -> float:

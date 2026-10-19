@@ -7,6 +7,8 @@ opaque identifier, and must never store an account name or email address.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
 import json
 from pathlib import Path
 
@@ -20,8 +22,8 @@ from ai_monitor.sources.codex import CodexAdapter
 
 class TestDeriveAccountId:
     def test_is_stable_for_the_same_identity(self):
-        first = derive_account_id("codex", "acct-1", "digest-key")
-        second = derive_account_id("codex", "acct-1", "digest-key")
+        first = derive_account_id("codex", "acct-1", "digest-key-0123456789")
+        second = derive_account_id("codex", "acct-1", "digest-key-0123456789")
         assert first == second
         assert first is not None
 
@@ -35,11 +37,13 @@ class TestDeriveAccountId:
             "codex", "acct-1", "k2"
         )
 
-    def test_does_not_contain_the_raw_identity(self):
-        digest = derive_account_id("codex", "user@example.com", "digest-key")
-        assert digest is not None
-        assert "user" not in digest
-        assert "@" not in digest
+    def test_digest_is_a_source_scoped_hmac(self):
+        expected = hmac.new(
+            b"digest-key-0123456789", b"codex:acct-1", hashlib.sha256
+        ).hexdigest()[:32]
+        assert derive_account_id("codex", "acct-1", "digest-key-0123456789") == expected
+        assert len(expected) == 32
+        assert set(expected) <= set("0123456789abcdef")
 
     @pytest.mark.parametrize(
         "identity, digest_key",
@@ -114,12 +118,12 @@ class TestCodexAccountId:
             data_dir=str(tmp_path / "data"),
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
-            account_digest_key="digest-key",
+            account_digest_key="digest-key-0123456789",
         )
         out = CodexAdapter().fetch(cfg)
         thread.join(timeout=5)
 
-        expected = derive_account_id("codex", "acct-1", "digest-key")
+        expected = derive_account_id("codex", "acct-1", "digest-key-0123456789")
         assert out["account_id"] == expected
         assert "acct-1" not in json.dumps(out)
 
@@ -143,29 +147,42 @@ class TestCodexAccountId:
             data_dir=str(tmp_path / "data"),
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
-            account_digest_key="digest-key",
+            account_digest_key="digest-key-0123456789",
         )
         out = CodexAdapter().fetch(cfg)
         thread.join(timeout=5)
 
         assert "account_id" not in out
 
-    def test_raw_identity_is_not_persisted(
-        self, tmp_path: Path, sample_config: Config, sample_db
-    ):
+    def test_raw_identity_is_not_persisted(self, tmp_path: Path, sample_db):
+        """The whole path must drop the raw identity, not just the adapter.
+
+        The fake app-server reports an email address; only the opaque digest
+        may reach the database.
+        """
+        sock = tmp_path / "codex.sock"
+        thread = _serve_once(
+            sock, {**KEYED, "account": {"email": "user@example.com"}}
+        )
+        cfg = Config(
+            data_dir=str(tmp_path / "data"),
+            codex_app_server_socket=str(sock),
+            codex_timeout_seconds=5,
+            account_digest_key="digest-key-0123456789",
+        )
         source = get_source_def("codex")
-        raw = {
-            "status": "success",
-            "quota_windows": [{"id": "codex:5h:primary", "used_percent": 20.0}],
-            "account_id": derive_account_id("codex", "user@example.com", "digest-key"),
-        }
-        obs = normalize_observation(source, raw)
+        obs = normalize_observation(source, CodexAdapter().fetch(cfg))
+        thread.join(timeout=5)
+
+        assert obs.account_id == derive_account_id(
+            "codex", "user@example.com", "digest-key-0123456789"
+        )
         sample_db.insert_observation(source, obs)
 
         rows, _ = sample_db.history(hours=1, limit=10, source="codex")
         blob = json.dumps(rows)
         assert "user@example.com" not in blob
-        assert obs.account_id is not None
+        assert "example.com" not in blob
         assert obs.account_id in blob
 
     def test_same_account_history_is_same_account_only(
@@ -177,7 +194,7 @@ class TestCodexAccountId:
             raw = {
                 "status": "success",
                 "quota_windows": [{"id": "w", "used_percent": used}],
-                "account_id": derive_account_id("codex", identity, "digest-key"),
+                "account_id": derive_account_id("codex", identity, "digest-key-0123456789"),
             }
             obs = normalize_observation(source, raw)
             sample_db.insert_observation(source, obs)
@@ -190,7 +207,7 @@ class TestCodexAccountId:
             hours=1,
             limit=10,
             source="codex",
-            account_id=derive_account_id("codex", "acct-1", "digest-key"),
+            account_id=derive_account_id("codex", "acct-1", "digest-key-0123456789"),
         )
         assert len(rows) == 1
         assert rows[0]["quotaWindows"][0]["usedPercent"] == 10.0

@@ -52,6 +52,12 @@ sudo install -d -m 0750 -o root -g ai-monitor /etc/ai-monitor
 sudo install -m 0640 -o root -g ai-monitor deploy/config.example.json /etc/ai-monitor/config.json
 sudoedit /etc/ai-monitor/config.json   # set the socket path, agy path, keys
 
+# Generate the account digest key used to derive opaque account ids. Without
+# it, account-scoped trends (same-account pace, spend deltas) are disabled and
+# the service logs a warning at startup. It must be at least 16 characters.
+python3 -c 'import secrets; print(secrets.token_hex(32))'
+# Then set "account_digest_key" to that value in the config.
+
 # 4. Unit, then start.
 sudo install -m 0644 deploy/ai-monitor.service /etc/systemd/system/ai-monitor.service
 sudo systemctl daemon-reload

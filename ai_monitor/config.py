@@ -250,6 +250,13 @@ def _validate(cfg: Config) -> None:
             "invalid_range",
             "history_max_limit must be >= history_default_limit",
         )
+    if cfg.account_digest_key and len(cfg.account_digest_key) < 16:
+        raise ConfigError(
+            "invalid_range",
+            "account_digest_key must be at least 16 characters when set: the "
+            "identities it digests are low entropy (account names, emails), so a "
+            "short key could be brute-forced from a database dump",
+        )
 
 
 def _from_dict(raw: dict[str, Any]) -> Config:

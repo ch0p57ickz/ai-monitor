@@ -156,3 +156,16 @@ def test_history_max_less_than_default_rejected():
             history_max_hours=12,
         )
     assert exc_info.value.category == "invalid_range"
+
+
+def test_short_account_digest_key_rejected():
+    """A short key is offline-brute-forceable from a database dump."""
+    with pytest.raises(ConfigError) as exc_info:
+        Config(account_digest_key="tooshort")
+    assert exc_info.value.category == "invalid_range"
+
+
+def test_empty_account_digest_key_accepted():
+    """An empty key disables account scoping; that is allowed."""
+    assert Config(account_digest_key="").account_digest_key == ""
+    assert len(Config(account_digest_key="k" * 16).account_digest_key) == 16
