@@ -593,6 +593,43 @@ Remediation, in order: install the current unit, install the code and venv, then
 `systemctl reset-failed ai-monitor` and start. The runbook's install section has
 the commands.
 
+## Second deployment attempt: the unit works, the config is missing (2026-10-19)
+
+The install went further. The unit is now the current one (`diff` against the
+repository is clean), the virtualenv installs and runs — `ai-monitor --version`
+reports `0.1.0` — and the failure moved on:
+
+```text
+ai-monitor[3043009]: ERROR ai_monitor: config error: config file not found:
+                     /etc/ai-monitor/config.json
+systemd[1]: Main process exited, code=exited, status=2/INVALIDARGUMENT
+systemd[1]: Start request repeated too quickly.
+systemd[1]: Failed to start ai-monitor.service
+```
+
+`/etc/ai-monitor` exists at `0750 root:ai-monitor`; the config file step was
+skipped. This is the third distinct silent failure in the same install, and the
+first the start limit caught: `StartLimitBurst` stopped it after ten attempts and
+reported `failed`, where the earlier unit restarted indefinitely. That change is
+what turned an invisible loop into a named failure.
+
+**The deployment tree carries a world-readable `.env`.** `/opt/ai-monitor` is
+`0775`, `/opt/ai-monitor/.env` is `0664 ai-monitor:ai-monitor`, and `/opt` is
+world-traversable, so any local user can read it. The copy was a full-tree copy
+rather than the runbook's allowlist form. The service never reads that file — it
+reads `/etc/ai-monitor/config.json` — so it is pure liability: until it is removed,
+treat its contents as disclosed and rotate them.
+
+The tree also carries `build/`, `ai_monitor.egg-info/`, `tests/`, `openspec/`,
+`.opencode/`, `.agents/`, `.pytest_cache/`, and `.gitignore`, none of which belong
+in a deployment. The allowlist step exists to keep them out.
+
+Three attempts have now failed on three different preconditions, each invisible
+until the journal was read, so the runbook has one precondition block before
+`enable --now` with a line per failure this host has produced. The config check runs
+as the service account deliberately: `sudo test -r` runs as root and passes no matter
+what the service will actually see.
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |

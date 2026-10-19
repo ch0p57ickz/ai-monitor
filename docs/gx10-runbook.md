@@ -204,14 +204,8 @@ sudoedit /etc/ai-monitor/config.json   # set codex_bin, the agy path, keys
 python3 -c 'import secrets; print(secrets.token_hex(32))'
 # Then set "account_digest_key" to that value in the config.
 
-# 4. Unit, then start. Confirm the service account's home is writable first:
-# the unit fails to start if /home/ai-monitor does not exist, and the Codex
-# child fails if it exists but is not writable.
-id ai-monitor && sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" \
-  && echo "home is writable"
-
-# Install the unit *from this repository*. A stale copy is a real failure mode:
-# this host was found running a unit predating ReadWritePaths=/home/ai-monitor,
+# 4. Unit. Install it *from this repository*: a stale copy is a real failure mode.
+# This host was found running a unit predating ReadWritePaths=/home/ai-monitor,
 # which leaves the Codex child unable to write ~/.codex under ProtectSystem=strict.
 # `diff` against the file in the repository shows any drift.
 sudo install -m 0644 deploy/ai-monitor.service /etc/systemd/system/ai-monitor.service
@@ -223,6 +217,33 @@ sudo systemctl daemon-reload
 # was still empty, which is precisely the state that produces status=203/EXEC.
 sudo systemd-analyze verify /etc/systemd/system/ai-monitor.service
 
+# 5. Check every precondition, then start. Each line below corresponds to a
+# failure observed on this host, and each was silent until the journal was read:
+#
+#   binary missing or not executable  -> status=203/EXEC
+#   config missing or unreadable      -> "config file not found", exit 2
+#   service account's home unwritable -> the Codex child cannot write ~/.codex
+#   a secret copied into the tree     -> world-readable credentials
+#
+# The config check runs as the service account deliberately. `sudo test -r` runs
+# as root and passes no matter what the service will actually see.
+id ai-monitor
+sudo test -x /opt/ai-monitor/venv/bin/ai-monitor && echo "binary executable: ok"
+sudo -u ai-monitor test -r /etc/ai-monitor/config.json \
+  && echo "config readable by ai-monitor: ok"
+sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" \
+  && echo "home writable: ok"
+sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree: ok"
+
+# Any line missing above means fixing that thing before starting. A tree copied
+# without the step 2 allowlist also carries `.gitignore`, `tests/`, `openspec/`,
+# `build/`, and `.pytest_cache/`; none belong here, and `.env` is the one that
+# matters, because this repository keeps it at mode 0664 and /opt is
+# world-traversable:
+#
+#   sudo rm -f /opt/ai-monitor/.env
+#   sudo test ! -e /opt/ai-monitor/.env && echo "gone"
+
 sudo systemctl enable --now ai-monitor
 
 # `enable --now` returns success even when the unit fails immediately, and
@@ -233,11 +254,17 @@ systemctl status ai-monitor --no-pager
 journalctl -u ai-monitor -n 20 --no-pager
 ```
 
-If the unit is not `active`, the journal says why. `status=203/EXEC` means the
-binary in `ExecStart` cannot be executed — almost always a missing or incomplete
-step 2. `StartLimitBurst` stops the unit after ten failed starts in five minutes
-and reports it as failed, so a broken deployment fails visibly instead of
-restarting forever; after fixing the cause, clear the counter and start again:
+If the unit is not `active`, the journal says why:
+
+- `status=203/EXEC` means the binary in `ExecStart` cannot be executed — almost
+  always a missing or incomplete step 2.
+- `status=2` with `config error: config file not found` means step 3 was skipped,
+  or the file is not readable by the service account.
+
+`StartLimitBurst` stops the unit after ten failed starts in five minutes and reports
+it as failed, so a broken deployment fails visibly instead of restarting forever.
+That is the intended behaviour, not a second fault. After fixing the cause, clear
+the counter and start again:
 
 ```sh
 sudo systemctl reset-failed ai-monitor
