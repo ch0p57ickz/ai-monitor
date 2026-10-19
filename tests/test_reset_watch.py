@@ -147,6 +147,95 @@ class TestIsDrifting:
         assert watch.is_drifting(previous, current) is False
 
 
+class TestAnalyze:
+    """The rules must fail the pre-fix behaviour and pass the fixed one."""
+
+    def _drifting_pair(self, classification: str, expected):
+        # resetsAt advances by one poll interval: a boundary tracking the clock.
+        first = _window(usedPercent=0.0, resetsAt="2026-10-19T19:38:28Z")
+        second = _window(
+            usedPercent=0.0,
+            resetsAt="2026-10-19T19:39:29Z",
+            pace={
+                "classification": classification,
+                "basis": "estimated" if expected is not None else "none",
+                "expectedUsedPercent": expected,
+            },
+        )
+        return [
+            ("2026-10-19T19:38:07Z", first),
+            ("2026-10-19T19:39:07Z", second),
+        ]
+
+    def test_a_fabricated_label_on_a_drifting_boundary_fails(self, watch):
+        failures, _, drifting = watch.analyze(
+            self._drifting_pair("at", 0.0), suffix="primary", require_reset=False
+        )
+        assert drifting == 1
+        assert any("drifting" in failure for failure in failures)
+
+    def test_unknown_on_a_drifting_boundary_passes(self, watch):
+        failures, _, drifting = watch.analyze(
+            self._drifting_pair("unknown", None), suffix="primary", require_reset=False
+        )
+        assert drifting == 1
+        assert failures == []
+
+    def test_a_missing_reset_fails_when_required(self, watch):
+        samples = [("2026-10-19T19:38:07Z", _window())]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=True
+        )
+        assert any("no reset was observed" in failure for failure in failures)
+
+    def test_a_missing_reset_is_tolerated_when_not_required(self, watch):
+        samples = [("2026-10-19T19:38:07Z", _window())]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert failures == []
+
+    def test_a_reset_with_a_stale_expectation_fails(self, watch):
+        """A pace left on the window that just ended reads ~100."""
+        samples = [
+            ("t0", _window(usedPercent=25.0, resetsAt="2026-10-19T19:37:35Z")),
+            (
+                "t1",
+                _window(
+                    usedPercent=0.0,
+                    resetsAt="2026-10-20T00:38:28Z",
+                    pace={
+                        "classification": "under",
+                        "basis": "estimated",
+                        "expectedUsedPercent": 99.0,
+                    },
+                ),
+            ),
+        ]
+        failures, resets, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert len(resets) == 1
+        assert any("expectedUsedPercent is 99.0" in failure for failure in failures)
+
+
+class TestReadLog:
+    def test_round_trips_recorded_samples(self, watch, tmp_path):
+        import json  # noqa: PLC0415
+
+        path = tmp_path / "log.jsonl"
+        path.write_text(
+            json.dumps({"at": "t0", "sample": 0, "window": None}) + "\n"
+            + json.dumps({"at": "t1", "sample": 1, "window": _window()}) + "\n"
+            + "not json\n"
+            + "\n"
+        )
+        samples = watch.read_log(str(path))
+        assert [at for at, _ in samples] == ["t0", "t1"]
+        assert samples[0][1] is None
+        assert samples[1][1]["id"] == "codex:codex:primary"
+
+
 class TestParseIso:
     def test_trailing_z_is_utc(self, watch):
         parsed = watch.parse_iso("2026-10-19T19:37:34Z")

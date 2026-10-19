@@ -26,10 +26,16 @@ throughout, records every sample as JSON Lines, and checks:
 Pass ``--require-reset`` for a long watch that must span a window turnover; the
 default lenient setting is what makes the drift rule checkable in a few minutes.
 
+``--replay`` applies the same rules to a recorded log instead of sampling live.
+That is how the guard proves it bites: replaying the pre-fix log — which recorded
+a classified pace while the boundary was drifting — must FAIL, while the post-fix
+log must pass.
+
 It writes only to a temporary data directory and to the ``--log`` file. Run it
 from the repository root with the package importable:
 
     python3 tools/reset_watch.py --minutes 50 --require-reset
+    python3 tools/reset_watch.py --replay /tmp/opencode/reset-watch.jsonl
 
 Exit status is 0 only when every expectation above holds.
 """
@@ -65,6 +71,10 @@ DRIFT_SLOP_SECONDS = 10.0
 #: After a reset the elapsed fraction is tiny, so a classified expectation must
 #: be small. A stale window start yields 100, which this bound separates.
 POST_RESET_MAX_EXPECTED = 30.0
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _get(url: str) -> tuple[int, dict[str, Any]]:
@@ -130,16 +140,6 @@ def detect_reset(
     return None
 
 
-def _sample(window: Optional[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "id": (window or {}).get("id"),
-        "usedPercent": (window or {}).get("usedPercent"),
-        "resetsAt": (window or {}).get("resetsAt"),
-        "durationMinutes": (window or {}).get("durationMinutes"),
-        "pace": (window or {}).get("pace"),
-    }
-
-
 def boundary_drift(
     previous: Optional[dict[str, Any]], current: Optional[dict[str, Any]]
 ) -> Optional[float]:
@@ -175,6 +175,110 @@ def is_drifting(
     return drift < float(duration) * 60.0 * RESET_JUMP_RATIO
 
 
+def analyze(
+    samples: list[tuple[str, Optional[dict[str, Any]]]],
+    *,
+    suffix: str,
+    require_reset: bool,
+) -> tuple[list[str], list[dict[str, Any]], int]:
+    """Apply the sample rules. Returns ``(failures, resets, drifting)``.
+
+    Kept pure so the same rules run against a recorded log, which is what makes
+    the guard falsifiable offline.
+    """
+    failures: list[str] = []
+    resets: list[dict[str, Any]] = []
+    previous: Optional[dict[str, Any]] = None
+    drifting = 0
+
+    for at, window in samples:
+        if not window:
+            continue
+        reason = detect_reset(previous, window)
+        if reason:
+            resets.append({"at": at, "reason": reason, "window": window})
+        if is_drifting(previous, window):
+            drifting += 1
+            pace = window.get("pace") or {}
+            if pace.get("classification") != "unknown":
+                failures.append(
+                    f"a drifting boundary at {at} was classified {json.dumps(pace)} "
+                    f"instead of unknown"
+                )
+        previous = window
+
+    if require_reset and not resets:
+        failures.append(
+            "no reset was observed: the window did not turn over during the watch"
+        )
+
+    for entry in resets:
+        pace = entry["window"].get("pace") or {}
+        expected = pace.get("expectedUsedPercent")
+        if pace.get("classification") == "unknown":
+            # A provisional boundary right after a reset is the honest answer;
+            # the drift rule above is what forbids a fabricated label.
+            continue
+        if not isinstance(expected, (int, float)):
+            failures.append(f"post-reset pace has no expectation: {json.dumps(pace)}")
+        elif expected > POST_RESET_MAX_EXPECTED:
+            failures.append(
+                f"post-reset expectedUsedPercent is {expected} (a stale window "
+                f"start would explain this); the new window must compare against "
+                f"its own elapsed fraction"
+            )
+
+    # The window identity must survive a reset; only its values change.
+    ids = {entry["window"].get("id") for entry in resets}
+    if any(identifier != f"codex:codex:{suffix}" for identifier in ids):
+        failures.append(f"the window id changed across a reset: {sorted(ids)}")
+
+    return failures, resets, drifting
+
+
+def read_log(path: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
+    """Read a recorded JSON Lines log into ``(at, window)`` samples."""
+    samples: list[tuple[str, Optional[dict[str, Any]]]] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            samples.append((record.get("at", "?"), record.get("window")))
+    return samples
+
+
+def _report(
+    failures: list[str],
+    resets: list[dict[str, Any]],
+    drifting: int,
+    samples: int,
+    history_lengths: list[int],
+) -> int:
+    print()
+    print(
+        f"samples: {samples}  resets observed: {len(resets)}  "
+        f"drifting samples: {drifting}"
+    )
+    for entry in resets:
+        print(f"  reset at {entry['at']}: {entry['reason']}")
+    if history_lengths:
+        print(f"history lengths seen: {sorted(set(history_lengths))}")
+
+    if failures:
+        print()
+        for failure in failures:
+            print(f"FAIL: {failure}")
+        return 1
+    print()
+    print("reset watch complete: all expectations met")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--minutes", type=float, default=50.0)
@@ -186,6 +290,11 @@ def main() -> int:
         help="fail unless a window turnover is observed during the watch",
     )
     parser.add_argument(
+        "--replay",
+        default=None,
+        help="apply the rules to a recorded JSON Lines log instead of sampling",
+    )
+    parser.add_argument(
         "--log",
         default=os.path.join(
             tempfile.gettempdir(),
@@ -193,6 +302,14 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    if args.replay:
+        samples = read_log(args.replay)
+        print(f"replaying {len(samples)} samples from {args.replay}")
+        failures, resets, drifting = analyze(
+            samples, suffix=args.suffix, require_reset=args.require_reset
+        )
+        return _report(failures, resets, drifting, len(samples), [])
 
     workdir = tempfile.mkdtemp(prefix="ai-monitor-reset-watch-")
     config = Config(
@@ -210,12 +327,9 @@ def main() -> int:
     worker.start()
     base = f"http://127.0.0.1:{server.port}"
 
+    samples: list[tuple[str, Optional[dict[str, Any]]]] = []
     history_lengths: list[int] = []
-    failures: list[str] = []
-    resets: list[dict[str, Any]] = []
-    previous: Optional[dict[str, Any]] = None
-    drifting = 0
-    samples = 0
+    status_failures: list[str] = []
 
     print(f"watching codex '{args.suffix}' for {args.minutes:.0f} min on {base}")
     print(f"recording samples to {args.log}")
@@ -229,33 +343,15 @@ def main() -> int:
                     f"{base}/api/v1/usage/history?hours=1&limit=5"
                 )
                 if status != 200:
-                    failures.append(f"/api/v1/usage returned {status}")
+                    status_failures.append(f"/api/v1/usage returned {status}")
                 if hist_status == 200:
                     history_lengths.append(len(history.get("observations", [])))
 
                 window = find_window(usage, args.suffix) if status == 200 else None
-                current = _sample(window) if window else None
-                reason = detect_reset(previous, current)
-                if reason and current:
-                    entry = {"at": _now(), "reason": reason, "window": current}
-                    resets.append(entry)
-                    print(f"RESET detected: {reason} -> {json.dumps(entry)}")
-                if current and is_drifting(previous, current):
-                    drifting += 1
-                    if (current.get("pace") or {}).get("classification") != "unknown":
-                        failures.append(
-                            f"a drifting boundary at {_now()} was classified "
-                            f"{json.dumps(current.get('pace'))} instead of unknown"
-                        )
-                log.write(
-                    json.dumps(
-                        {"at": _now(), "sample": samples, "window": current}
-                    )
-                    + "\n"
-                )
+                at = _now()
+                samples.append((at, window))
+                log.write(json.dumps({"at": at, "sample": len(samples) - 1, "window": window}) + "\n")
                 log.flush()
-                previous = current or previous
-                samples += 1
 
                 remaining = args.interval - (time.monotonic() - loop_start)
                 if remaining > 0:
@@ -266,59 +362,16 @@ def main() -> int:
         db.close()
         shutil.rmtree(workdir, ignore_errors=True)
 
-    print()
-    print(f"samples: {samples}  resets observed: {len(resets)}  drifting samples: {drifting}")
-    if history_lengths:
-        print(f"history lengths seen: {sorted(set(history_lengths))}")
-    if len(resets) >= 3:
-        print(
-            f"note: {len(resets)} turns were counted; a convergence rollover of "
-            f"the same window can look like several resets"
-        )
-
-    if samples < 2:
+    failures, resets, drifting = analyze(
+        samples, suffix=args.suffix, require_reset=args.require_reset
+    )
+    failures = list(status_failures) + failures
+    if len(samples) < 2:
         failures.append("not enough samples to judge anything")
-    if args.require_reset and not resets:
-        failures.append(
-            "no reset was observed: the window did not turn over during the watch"
-        )
-    for entry in resets:
-        window = entry["window"]
-        pace = window.get("pace") or {}
-        expected = pace.get("expectedUsedPercent")
-        classification = pace.get("classification")
-        if classification == "unknown":
-            # A provisional boundary right after a reset is the honest answer;
-            # the drift rule below is what forbids a fabricated label.
-            continue
-        if not isinstance(expected, (int, float)):
-            failures.append(f"post-reset pace has no expectation: {json.dumps(pace)}")
-        elif expected > POST_RESET_MAX_EXPECTED:
-            failures.append(
-                f"post-reset expectedUsedPercent is {expected} (a stale window "
-                f"start would explain this); the new window must compare against "
-                f"its own elapsed fraction"
-            )
-    # The window identity must survive a reset; only its values change.
-    ids = {entry["window"].get("id") for entry in resets}
-    if any(identifier != f"codex:codex:{args.suffix}" for identifier in ids):
-        failures.append(f"the window id changed across a reset: {sorted(ids)}")
     over = [length for length in history_lengths if length > 5]
     if over:
         failures.append(f"history returned more than the requested limit: {over}")
-
-    if failures:
-        print()
-        for failure in failures:
-            print(f"FAIL: {failure}")
-        return 1
-    print()
-    print("reset watch complete: all expectations met")
-    return 0
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _report(failures, resets, drifting, len(samples), history_lengths)
 
 
 if __name__ == "__main__":
