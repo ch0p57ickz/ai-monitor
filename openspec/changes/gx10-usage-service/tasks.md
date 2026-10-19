@@ -1,12 +1,12 @@
 ## 1. Host validation and project setup
 
-- [ ] 1.1 Produce a redacted GX10 capability report for Python, the service manager, Codex app-server, Antigravity, both OpenRouter endpoints and their credential permissions, and Tailscale; verify it lists versions, bucket names, field presence, and separate endpoint error categories without secrets or raw payloads.
-- [ ] 1.2 Create the Python service package, configuration loading, and documented default poll intervals and bounds; verify the service starts locally with unavailable adapters and rejects invalid configuration.
+- [x] 1.1 Produce a redacted GX10 capability report (report: `docs/gx10-capability-report.md`) for Python, the service manager, Codex app-server, Antigravity, both OpenRouter endpoints and their credential permissions, and Tailscale; verify it lists versions, bucket names, field presence, and separate endpoint error categories without secrets or raw payloads.
+- [x] 1.2 Create the Python service package, configuration loading, and documented default poll intervals and bounds; verify the service starts locally with unavailable adapters and rejects invalid configuration.
 
 ## 2. Data model, persistence, and pace
 
-- [ ] 2.1 Define normalized observations, quota windows, budget records, opaque account IDs, and the version 1 JSON fields and enums in the API spec; verify synthetic serialization matches the contract, missing fields stay `null`, and account and key budgets remain distinct.
-- [ ] 2.2 Implement SQLite schema, WAL setup, short writes, latest-observation reads per source, and bounded retention; verify a restart preserves successful observations and pruning keeps each source's latest result.
+- [x] 2.1 Define normalized observations, quota windows, budget records, opaque account IDs, and the version 1 JSON fields and enums in the API spec; verify synthetic serialization matches the contract, missing fields stay `null`, and account and key budgets remain distinct.
+- [x] 2.2 Implement SQLite schema, WAL setup, short writes, latest-observation reads per source, and bounded retention; verify a restart preserves successful observations and pruning keeps each source's latest result.
 - [ ] 2.3 Implement source state and freshness from last attempt, last success, and configured intervals; verify failed polls retain the last good reading, stale begins after two missed intervals, and a never-successful source has no usage observation but has health state.
 - [ ] 2.4 Implement quota pace with reported or estimated window starts, plausibility checks, and configurable tolerance; verify synthetic cases for under, at, over, estimated, and unknown pace.
 - [ ] 2.5 Implement same-account OpenRouter spend deltas and exact-boundary budget pace; verify account changes and `limit_reset: "monthly"` without a timestamp do not produce an exact pace.
