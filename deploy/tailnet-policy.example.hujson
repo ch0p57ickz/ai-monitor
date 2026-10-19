@@ -1,0 +1,74 @@
+// Tailnet policy fragment that restricts the ai-monitor widget API on zoey.
+//
+// Context. This tailnet's effective policy is the default allow-all. That is not
+// a guess: `tailscale debug netmap` runs unprivileged and carries the packet
+// filter the control plane distributed to this node. On 2026-10-19 it held a
+// single rule whose sources span the whole CGNAT range and whose destinations are
+// every port:
+//
+//   Srcs  = 100.115.94.0/23, 100.96.0.0/12, ... fd7a:115c:a1e0::/48
+//   Dsts  = 0.0.0.0/0:* , ::/0:*
+//
+// Under that policy every member device reaches zoey on every port, so adding a
+// grant for port 443 would narrow nothing: access rules union, and the only
+// action is `accept` — there are no deny rules to add. The allow-all grant has
+// to be replaced by explicit grants instead, which is what this file does.
+//
+// Two consequences of that replacement, both deliberate:
+//
+//   1. Port 443 disappears from the blanket grant everywhere, not only on zoey,
+//      because a destination cannot be negated. If another node serves HTTPS on
+//      443, it becomes unreachable to `*` and needs a grant of its own. Check
+//      before applying; the alternative is to serve the widget API on a
+//      dedicated port (see the runbook).
+//   2. Every other port keeps exactly the reach it has today, which is what keeps
+//      zoey's four existing Serve routes (3773, 8443, 8444, 8445) working for
+//      every device.
+//
+// Merge this into the existing policy file. If that file already defines groups,
+// tagOwners, nodeAttrs, or grants, keep them: replace only the rule that grants
+// `*` to every port. The admin console validates the result on save, including
+// the `tests` block at the bottom.
+
+{
+  "hosts": {
+    // Host aliases resolve to a Tailscale IP. zoey is user-owned and untagged, so
+    // it has no tag to name it by. Keep this in step with the tests below.
+    "zoey": "100.108.85.109"
+  },
+
+  "acls": [
+    {
+      // Everything keeps the reach it has today, except port 443 anywhere.
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:1-442,444-65535"]
+    },
+    {
+      // The widget API. `src` as a login name selects every device that user
+      // owns, which is the tailnet-identity restriction the requirement asks for;
+      // tag:agent devices belong to the separate "tagged-devices" identity and
+      // are not included. To pin it to two devices instead, define host aliases
+      // for their Tailscale IPs and list those here.
+      "action": "accept",
+      "src": ["papaya.ch0mp@gmail.com"],
+      "dst": ["zoey:443"]
+    }
+  ],
+
+  "tests": [
+    {
+      // The intended device reaches the widget API.
+      "src": "papaya.ch0mp@gmail.com",
+      "accept": ["100.108.85.109:443"]
+    },
+    {
+      // A tagged service node does not, and keeps the other zoey routes. This is
+      // the assertion that fails if the blanket rule is ever edited back to
+      // covering port 443.
+      "src": "tag:agent",
+      "deny": ["100.108.85.109:443"],
+      "accept": ["100.108.85.109:8443"]
+    }
+  ]
+}

@@ -314,28 +314,48 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | HTTPS certificates | Enabled in the tailnet (the existing mappings already use `ts.net` names) |
 | Node and domain | `zoey` (`100.108.85.109`), `zoey.tail831c33.ts.net` |
 | Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
-| Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync` — which are not granted access to user devices |
+| Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync`, `hermes`, `openclaw-gx10` — all `tag:agent`, owned by the `tagged-devices` identity rather than the operator |
 | Node ownership | User-owned, untagged (`tailscale status --json` shows no `Tags`, no advertised services) |
 | Service alternative | Not available without re-tagging `zoey`, which changes how the node authenticates and drops the `Tailscale-User-Login` header that Serve injects for user devices only |
 | Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
 
-Serve access control is the tailnet policy file, which is deny-by-default and not
-visible from the CLI, so the access rules themselves remain unverified. The
-survey, `tailscale serve status`, and `tailscale funnel status` all ran without
-privileges; `tailscale serve` itself does not.
+### Finding: the policy is allow-all, and its effect is observable
 
-The denied-device half of 5.3 is the part at risk, and not for a mechanical
-reason. A route on a node is a *device* endpoint, governed by the device rules in
-the policy file — which is why this tailnet moved its agent dashboards to
-Tailscale Services, after finding that a device route on `ranger` stayed reachable
-by anyone the device rules already allowed. Here the spec requires Serve, and a
-Service host must be a tagged device, which `zoey` is not. So the restriction has
-to come from narrowing the device rules for `zoey:443`, and two things follow that
-no CLI command can check: whether the current policy already allows the intended
-devices (or every member device) to reach `zoey`, in which case adding a grant
-narrows nothing because rules union; and whether narrowing stays port-specific, so
-that `zoey`'s four other routes keep working. See the runbook for the options if
-it cannot be narrowed cleanly.
+The policy file is not readable from the CLI, but its effect on this node is.
+`tailscale debug netmap` runs unprivileged and carries the packet filter the
+control plane distributed to `zoey`. On 2026-10-19 it held a single rule:
+
+```text
+SrcIPs   100.115.94.0-100.127.255.255, 100.64.0.0-100.115.91.255, fd7a:115c:a1e0::/48
+DstPorts IP "*", ports 0-65535
+```
+
+That is the translated form of the default allow-all policy, so every member
+device reaches `zoey` on every port today, `tag:agent` service nodes included. The
+earlier note that the access rules "remain unverified" was too pessimistic: the
+rules are not readable, but the filter they produce is.
+
+Two consequences:
+
+1. **Adding a rule cannot restrict anything.** Rules union and the only action is
+   `accept`, so the allow-all rule has to be replaced by explicit grants. A
+   destination cannot be negated, so the served port has to be excluded from the
+   broad rule — globally, not just on `zoey`. If another node serves HTTPS on
+   `443` it then needs a grant of its own; `9443` is free on `zoey` and makes the
+   exclusion harmless, which is the alternative if that check cannot be made.
+2. **The change is verifiable without a console session.** Tailscale's policy
+   `tests` section asserts accept and deny per source and destination, and the
+   console runs it on save. `deploy/tailnet-policy.example.hujson` carries a
+   `tests` block asserting the denial for `tag:agent` on `443` *and* that the same
+   identity keeps reaching `8443`. `tests/test_tailnet_policy.py` holds the
+   example to the same requirement offline and fails if the blanket rule is edited
+   back to covering `443`.
+
+The device-level check still needs a device: from a `tag:agent` node, `443` should
+time out while `8443` still answers. A Service would avoid all of this, but a
+Service host must be tagged, and tagging `zoey` drops the `Tailscale-User-Login`
+header that Serve injects for user devices only — on a host that already serves
+four routes.
 
 ## Verification results (local, 2026-10-19)
 
