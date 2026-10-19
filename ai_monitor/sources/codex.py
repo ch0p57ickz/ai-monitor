@@ -26,6 +26,7 @@ import os
 import socket
 from typing import Any, Optional
 
+from ..identity import account_identity, derive_account_id
 from .registry import CollectionError, SourceAdapter
 
 HANDSHAKE_REQUEST: dict[str, Any] = {
@@ -216,11 +217,22 @@ class CodexAdapter(SourceAdapter):
         view = "keyed" if isinstance(keyed, dict) and keyed else "single"
         notes: dict[str, Any] = {"view": view}
 
-        return {
+        payload: dict[str, Any] = {
             "status": "success",
             "quota_windows": windows,
             "notes": notes,
         }
+
+        # Only an opaque, keyed digest is kept: the app-server identity (which
+        # may be an account name) is never stored. Without a digest key, or
+        # without an identity, the account stays unknown so account-dependent
+        # trends are avoided.
+        account_id = derive_account_id(
+            "codex", account_identity(result), config.account_digest_key
+        )
+        if account_id:
+            payload["account_id"] = account_id
+        return payload
 
 
 class _HandshakeError(Exception):

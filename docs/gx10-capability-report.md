@@ -65,10 +65,13 @@ process environment contains no OpenRouter key.
 
 Account identity: neither OpenRouter endpoint exposes an identity that is safe to
 store (the key payload's `label` may be a name or email), so `accountId` stays
-`null`. Per the design, a null identity means account-dependent trends are
-avoided: cross-snapshot spend deltas are not combined, so budget pace `basis`
-stays `none`/`estimated` and never `reported`. The delta path is exercised by
-tests with a synthetic account id.
+`null` for both OpenRouter streams. Per the design, a null identity means
+account-dependent trends are avoided: cross-snapshot spend deltas are not
+combined, so budget pace `basis` stays `none`/`estimated` and never `reported`
+on this host. Codex derives an opaque, keyed digest of the app-server account
+identity when it reports one and `account_digest_key` is configured; the raw
+identity is never stored. The delta path is exercised by tests with a synthetic
+account id.
 
 | Endpoint | Purpose | Unauthenticated result | Error category |
 | --- | --- | --- | --- |
