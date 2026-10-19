@@ -50,22 +50,33 @@ source exposing quota buckets is observed.
 
 ## OpenRouter endpoints
 
-Both endpoints were probed **without credentials** to record error categories.
-Neither endpoint is configured on this host yet: `envget -s` (name-only listing)
-shows no OpenRouter credential variable, and the process environment contains no
-OpenRouter key.
+The two current-key endpoints were probed **without credentials** to record error
+categories. The account-credit endpoint requires a credential and is listed for
+completeness only. No OpenRouter credential is configured on this host yet:
+`envget -s` (name-only listing) shows no OpenRouter credential variable, and the
+process environment contains no OpenRouter key.
 
 | Endpoint | Purpose | Unauthenticated result | Error category |
 | --- | --- | --- | --- |
 | `GET https://openrouter.ai/api/v1/key` | current-key usage/limits | HTTP 401, JSON `{"error":{"message":"No cookie auth credentials found","code":401}}` | `authentication` |
-| `GET https://openrouter.ai/api/v1/auth/key` | account credits (management) | HTTP 401, JSON `{"error":{"message":"No cookie auth credentials found","code":401}}` | `authentication` |
+| `GET https://openrouter.ai/api/v1/auth/key` | legacy alias of current-key info | HTTP 401, JSON `{"error":{"message":"No cookie auth credentials found","code":401}}` | `authentication` |
+| `GET https://openrouter.ai/api/v1/credits` | account credits (management/provisioning key) | Not probed (requires credential) | — |
+
+Correction: an earlier draft of this report labelled `/api/v1/auth/key` as the
+account-credit endpoint. `/api/v1/auth/key` is an alias of the current-key
+endpoint; account credits come from `/api/v1/credits`. The adapters use
+`/api/v1/credits` (account) and `/api/v1/key` (current key). `/api/v1/credits`
+could not be probed without a management credential.
 
 Credential-permission checks (required by task 1.1) are pending: once a key is
 provided to the service account, the service must verify (a) whether the current
 key can read `/api/v1/key` and (b) separately whether it (or a management key) can
-read `/api/v1/auth/key`, and record each as an independent stream. Until then,
-both streams start in `operator_action`/`not_configured` health state. No shared
-`Retry-After` behavior was observed in the 401 responses.
+read `/api/v1/credits`, and record each as an independent stream. A non-management
+key calling `/api/v1/credits` is expected to return HTTP 403, which the adapter
+reports as `authorization` (operator action) without affecting the current-key
+stream. Until a key is provided, both streams start in
+`operator_action`/`not_configured` health state. No shared `Retry-After` behavior
+was observed in the 401 responses.
 
 ## Tailscale Serve readiness
 
@@ -81,5 +92,5 @@ both streams start in `operator_action`/`not_configured` health state. No shared
 | --- | --- | --- |
 | `codex` | Yes (after daemon start) | Start `codex app-server daemon` on the service account; validate the keyed rate-limit view at first poll |
 | `antigravity` | No (session-only variant) | Adapter enabled but expected to report `unavailable`; no weekly quota to collect |
-| `openrouter-account` | No (no credential) | Awaiting credential for `/api/v1/auth/key`; error category `not_configured` until set |
+| `openrouter-account` | No (no credential) | Awaiting a management/provisioning credential for `/api/v1/credits` (`openrouter_management_key`, falling back to `openrouter_api_key`); error category `not_configured` until set, `authorization` if a non-management key is used |
 | `openrouter-key` | No (no credential) | Awaiting credential for `/api/v1/key`; error category `not_configured` until set |

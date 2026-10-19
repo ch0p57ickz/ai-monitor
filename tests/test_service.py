@@ -602,7 +602,7 @@ class TestRegistry:
         adapter = OpenRouterAccountAdapter()
         with pytest.raises(CollectionError) as exc_info:
             adapter.fetch(sample_config)
-        assert exc_info.value.category == "unavailable"
+        assert exc_info.value.category == "not_configured"
 
 
 # ---------------------------------------------------------------------------

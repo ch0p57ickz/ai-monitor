@@ -15,7 +15,7 @@
 
 - [x] 3.1 Implement the Codex app-server handshake and rate-limit parser; verify synthetic keyed limits preserve primary and secondary windows and the single-view fallback works.
 - [ ] 3.2 Implement Antigravity source discovery and supported-bucket parsing from the validated GX10 variant; verify session-only data is retained without a fabricated weekly quota and incompatible sources report unavailable.
-- [ ] 3.3 Implement independently committed OpenRouter account-credit and current-key results using the permitted credentials; verify either endpoint can succeed alone, each has separate health and freshness, and absent credit fields stay unknown.
+- [x] 3.3 Implement independently committed OpenRouter account-credit and current-key results using the permitted credentials; verify either endpoint can succeed alone, each has separate health and freshness, and absent credit fields stay unknown.
 - [ ] 3.4 Implement independent scheduled workers with deadlines, no same-source overlap, capped local backoff, jitter, `Retry-After` as an uncapped minimum delay, and operator-action handling for 401/403; verify a long `Retry-After` is honored and a failing or hung source does not delay another.
 - [ ] 3.5 Add redacted diagnostics and parser fixtures for missing fields, changed shapes, and source errors; verify logs and persisted records contain no credentials, CSRF tokens, email addresses, or full payloads.
 

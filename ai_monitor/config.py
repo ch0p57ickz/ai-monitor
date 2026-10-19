@@ -97,6 +97,9 @@ class Config:
     antigravity_timeout_seconds: int = int(DEFAULT_ANTIGRAVITY_TIMEOUT)
 
     openrouter_api_key: str = field(default="", repr=False, compare=False)
+    # Management/provisioning key for account credits (/api/v1/credits).
+    # Falls back to openrouter_api_key when empty.
+    openrouter_management_key: str = field(default="", repr=False, compare=False)
     openrouter_base_url: str = "https://openrouter.ai"
     openrouter_timeout_seconds: int = 15
 
@@ -212,6 +215,7 @@ def _coerce(key: str, value: Any) -> Any:
         "codex_app_server_socket",
         "antigravity_bin",
         "openrouter_api_key",
+        "openrouter_management_key",
         "openrouter_base_url",
     ):
         if not isinstance(value, str):
