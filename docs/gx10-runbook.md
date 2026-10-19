@@ -158,7 +158,7 @@ sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbi
 # 2. Code and virtualenv, owned by the service account.
 #
 # Copy with an allowlist, not a denylist. The checkout holds a `.env` at mode
-# 0664, and a plain `rsync -a` of the tree copies it into this 0755 directory,
+# 0664, and a plain `rsync -a` of the tree copies it into this 0775 directory,
 # where it is readable by every local user — rehearsed, and it leaks. Naming what
 # to copy fails safe instead: a new secret file is not copied unless it is named,
 # whereas one missing from a denylist leaks silently.
@@ -708,15 +708,23 @@ The steps, in order:
 #    "tagOwners": { "tag:zoey": ["papaya.ch0mp@gmail.com"] }
 
 # 2. Tag the host. This is a `tailscale up` flag, not a `tailscale set` one:
-#    `tailscale set` has no --advertise-tags in 1.102.4 and answers
-#    "flag provided but not defined". `up` preserves settings you do not mention,
-#    and this host has no advertised routes, exit node, or Tailscale SSH to lose.
-#    Tagging changes the node's ownership, so expect a re-authentication URL;
-#    complete it in a browser signed in as the tag owner. If the tag does not
-#    apply, repeat with --force-reauth.
-sudo tailscale up --advertise-tags=tag:zoey
+#    `tailscale set` has no --advertise-tags and answers "flag provided but not
+#    defined".
+#
+#    `up` is not a merge. Its help says "If flags are specified, the flags must be
+#    the complete set of desired settings", and it stops rather than silently
+#    resetting a setting you leave out. This host has one non-default setting —
+#    OperatorUser is `jp` — so name that too, or `up` exits with "requires
+#    mentioning all non-default flags". When it exits, it prints the command to run
+#    as "The following flags are missing: ...". Run that.
+sudo tailscale up --advertise-tags=tag:zoey --operator=jp
 tailscale status --json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["Tags"])'
+
+#    Tagging changes the node's ownership, so the same command may print a
+#    re-authentication URL; complete it in a browser signed in as the tag owner.
+#    --force-reauth is for a stale node key, which is a different problem from the
+#    missing-flags error above.
 
 # 3. Define the Service in the admin console (Services page): name it and give it
 #    the endpoint tcp:443. This needs Owner, Admin, or Network admin. To skip the

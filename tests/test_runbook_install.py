@@ -4,7 +4,7 @@ These commands run as root against a real host, so a mistake in them is expensiv
 Two classes of mistake are guarded here, both observed rather than imagined.
 
 ``rsync -a`` of the checkout copies the repository's ``.env`` — mode 0664 here —
-into a 0755 deployment directory, where every local user can read it. Rehearsed on
+into a 0775 deployment directory, where every local user can read it. Rehearsed on
 2026-10-19, and then seen on the host: the deployed tree carries a world-readable
 ``.env``. An allowlist fails safe; a denylist misses the file that matters, and the
 failure stays invisible because the service still works.
@@ -42,6 +42,11 @@ def _rsync_commands(text: str) -> list[str]:
     ]
 
 
+def _shell_blocks(text: str) -> list[str]:
+    """Every fenced ``sh`` block in the runbook."""
+    return re.findall(r"```sh\n(.*?)```", text, re.S)
+
+
 def test_both_copy_steps_use_an_allowlist():
     commands = _rsync_commands(RUNBOOK.read_text("utf-8"))
     assert len(commands) == 2, f"install and upgrade should each copy: {commands}"
@@ -50,6 +55,11 @@ def test_both_copy_steps_use_an_allowlist():
             assert f"--include '{include}'" in command, (
                 f"{include} is missing, so the deployed tree lacks it: {command}"
             )
+        # Closed on both sides. The list is the allowlist, so an extra `--include`
+        # is a new file entering the tree, not a harmless addition.
+        assert sorted(re.findall(r"--include '([^']*)'", command)) == sorted(
+            REQUIRED_INCLUDES
+        ), f"the include list is not the documented allowlist: {command}"
 
 
 def test_the_copy_excludes_nothing_by_name():
@@ -62,10 +72,21 @@ def test_the_copy_excludes_nothing_by_name():
 
 
 def test_both_copy_steps_check_for_a_leaked_env():
-    text = RUNBOOK.read_text("utf-8")
-    assert text.count("/opt/ai-monitor/.env") >= 2, (
-        "the install and the upgrade step should each confirm no .env landed"
-    )
+    """Counting mentions is not enough: the check has to be in the same step.
+
+    Two mentions could both sit in the install step, leaving the upgrade step —
+    the one that runs repeatedly against a live tree — to copy `.env` back in.
+    """
+    blocks = [
+        block
+        for block in _shell_blocks(RUNBOOK.read_text("utf-8"))
+        if "sudo rsync" in block
+    ]
+    assert len(blocks) == 2, f"install and upgrade should each copy: {len(blocks)}"
+    for block in blocks:
+        assert "/opt/ai-monitor/.env" in block, (
+            "every copy step must confirm no .env landed:\n" + block
+        )
 
 
 def test_the_config_check_runs_as_the_service_account():

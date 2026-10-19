@@ -6,8 +6,9 @@
 // single rule whose sources span the whole CGNAT range and whose destinations are
 // every port:
 //
-//   Srcs  = 100.115.94.0/23, 100.96.0.0/12, ... fd7a:115c:a1e0::/48
-//   Dsts  = 0.0.0.0/0:* , ::/0:*
+//   SrcIPs   100.115.94.0-100.127.255.255, 100.64.0.0-100.115.91.255,
+//            fd7a:115c:a1e0::/48
+//   DstPorts IP "*", ports 0-65535
 //
 // Under that policy every member device reaches zoey on every port, so adding a
 // grant for port 443 would narrow nothing: access rules union, and the only

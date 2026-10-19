@@ -15,7 +15,7 @@ contains no secret values, no raw provider payloads, and no account identifiers.
 | OS | Ubuntu 24.04.5 LTS (Noble Numbat) |
 | Python | 3.12.3 (`python3`, stdlib-only implementation target) |
 | Service manager | systemd 255 (255.4-1ubuntu8.17), system state `running`; supports a dedicated unprivileged service unit with `Restart=always` |
-| Tailscale | 1.102.4 (commit 3caf7d9e7dcaba589cfc58beda596929733e4fea); node `zoey` is active and connected |
+| Tailscale | 1.104.1 on the host as of this writing (1.102.4, commit `3caf7d9e7dcaba589cfc58beda596929733e4fea`, when first surveyed; the package auto-updates); node `zoey` is active and connected |
 
 Service manager decision: a systemd unit under a dedicated unprivileged account
 satisfies the `gx10-service-access` spec (dedicated account, automatic restart,
@@ -308,7 +308,7 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 
 | Item | Value |
 | --- | --- |
-| Serve available | Yes (Tailscale 1.102.4 includes Serve) |
+| Serve available | Yes (Serve is in the stable package; present in 1.102.4 and 1.104.1) |
 | Current HTTPS publications | Four mappings, all `(tailnet only)`: `3773`, `8443`, `8444`, `8445`; port `443` is free |
 | Funnel | Off — `tailscale funnel status` reports every mapping as `(tailnet only)` |
 | HTTPS certificates | Enabled in the tailnet (the existing mappings already use `ts.net` names) |
@@ -518,10 +518,11 @@ runbook uses the wheel form and warns against the venv flag.
 
 Rehearsing the copy step against a scratch destination — not reading the file, just
 checking what lands — showed `rsync -a` of the checkout brings `.env` along. In
-this repository `.env` is mode **0664**, and `/opt/ai-monitor` is **0755**, so the
-operator's credentials would sit world-readable on the deployed host. The service
-never reads that file; the credentials it uses live in `/etc/ai-monitor/config.json`
-at `0640 root:ai-monitor`.
+this repository `.env` is mode **0664**, and `/opt/ai-monitor` is world-traversable,
+so the operator's credentials would sit readable by every local user on the deployed
+host. (It was `0755` when this was written and `0775` after the copy landed; either
+one leaks.) The service never reads that file; the credentials it uses live in
+`/etc/ai-monitor/config.json` at `0640 root:ai-monitor`.
 
 The step now names what to copy instead of what to skip:
 
