@@ -150,10 +150,28 @@ Both tools run against this host's real providers; neither reads credentials.
 | Independent per-source failure | `tools/soak_check.py` | Pass — `codex` healthy while `antigravity` reported `unavailable` and both OpenRouter sources reported `operator_action` |
 | Bounded history | `tools/soak_check.py` | Pass — `hours` present, `truncated` reported |
 | Codex collection through stdio | `tools/soak_check.py`, `tools/codex_live_check.py` | Pass — real account data, no collection failures over 150 s |
+| Soak across an observed reset | `tools/reset_watch.py` (50 min) | Pass — the Codex 5h window turned over at 2026-10-19T19:37:35Z; the next sample reported `usedPercent: 0.0` with a new `resetsAt` and pace recomputed to the **new** window (`expectedUsedPercent: 0.0`), not the window that just ended (which would read ~100) |
+| Pace refuses a clock-tracking boundary | `tools/reset_watch.py` (4 min) | Pass — after the reset the app-server reported `resetsAt` as `now + 5h` on every poll (~61 s per 60 s poll), and pace is now `unknown` instead of a fabricated `at` |
+| Partial OpenRouter results | `tools/openrouter_live_check.py` | **Not verified** — needs a real credential |
 
-Not yet verified: a soak across an observed reset (the 5-hour window resets
-hours away), and partial OpenRouter results (no usable OpenRouter credential on
-this host).
+### Finding: a window end that tracks the clock
+
+The reset soak exposed a real defect. Before the reset the window end was a fixed
+instant and the elapsed fraction climbed 96% → 99.96%, which is the model pace
+assumes. After the reset the app-server reported `resetsAt` as `now + 5h` on
+every poll until something consumed the new window. The inferred start is then
+always "now", so the elapsed fraction is permanently zero and the service
+reported a confident `{"classification": "at", "expectedUsedPercent": 0.0}`.
+
+That label is fabricated, and the spec requires `unknown` when reset timing is
+implausible. Had the account been in use, the same drift would have produced a
+permanent false `over` instead. Fixed in commit `2577656`; the check compares the
+most recent prior snapshot only, since the rule is about consecutive snapshots.
+
+Not yet verified: partial OpenRouter results, which need a usable credential on
+this host. `tools/openrouter_live_check.py` runs both streams and reports each
+one's status and error category without printing the credential; it exits `2`
+when no credential is present.
 
 ## Capability summary for adapter enablement
 
