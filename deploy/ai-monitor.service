@@ -6,9 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Dedicated unprivileged account. It owns its own home so the Codex
-# app-server socket (~/.codex/app-server-control) and the Antigravity CLI
-# caches stay separate from the operator account.
+# Dedicated unprivileged account. It owns its own home so the Codex CLI state
+# (~/.codex) and the Antigravity CLI caches stay separate from the operator
+# account. The default stdio transport spawns `codex app-server` as a child of
+# this service, so it inherits this sandbox; only the alternative socket
+# transport needs ~/.codex/app-server-control to be reachable.
 User=ai-monitor
 Group=ai-monitor
 WorkingDirectory=/opt/ai-monitor

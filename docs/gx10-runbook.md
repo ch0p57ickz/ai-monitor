@@ -113,7 +113,7 @@ sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 # 3. Configuration with credentials, readable only by the service account.
 sudo install -d -m 0750 -o root -g ai-monitor /etc/ai-monitor
 sudo install -m 0640 -o root -g ai-monitor deploy/config.example.json /etc/ai-monitor/config.json
-sudoedit /etc/ai-monitor/config.json   # set the socket path, agy path, keys
+sudoedit /etc/ai-monitor/config.json   # set codex_bin, the agy path, keys
 
 # Generate the account digest key used to derive opaque account ids. Without
 # it, account-scoped trends (same-account pace, spend deltas) are disabled and
