@@ -1,0 +1,40 @@
+[Unit]
+Description=ai-monitor usage service (loopback JSON API for Codex, Antigravity, OpenRouter)
+Documentation=file:/opt/ai-monitor/docs/gx10-runbook.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged account. It owns its own home so the Codex
+# app-server socket (~/.codex/app-server-control) and the Antigravity CLI
+# caches stay separate from the operator account.
+User=ai-monitor
+Group=ai-monitor
+WorkingDirectory=/opt/ai-monitor
+
+# Credentials live in a 0600 config file owned by the service account, never
+# in this unit, the environment, or a world-readable path.
+ExecStart=/opt/ai-monitor/venv/bin/ai-monitor --config /etc/ai-monitor/config.json
+
+Restart=always
+RestartSec=5
+
+# Persistent state (SQLite in WAL mode) survives restarts.
+Environment=AI_MONITOR_DATA_DIR=/var/lib/ai-monitor
+StateDirectory=ai-monitor
+StateDirectoryMode=0700
+
+# Hardening. The service only needs its own home, its data directory, and
+# outbound network access to the providers.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/var/lib/ai-monitor
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,170 @@
+# GX10 runbook: ai-monitor usage service
+
+Commands for starting, upgrading, backing up, rolling back, and rotating
+credentials for the loopback usage service on the GX10 host (`zoey`).
+
+**Verification status:** the start/stop/backup/rollback commands below are
+standard `systemd` and `sqlite3` invocations, and each path is pinned to the
+layout used by `deploy/ai-monitor.service`. They have **not** yet been executed
+against a deployed unit on this host: tasks 5.2 (install under a dedicated
+account), 5.3 (Tailscale Serve), and the soak in 5.1 are still pending operator
+approval. Treat the steps as reviewed-but-unexecuted until the first install.
+
+## Layout
+
+| Path | Purpose |
+| --- | --- |
+| `/opt/ai-monitor` | Code checkout and virtualenv (`venv/`) |
+| `/etc/ai-monitor/config.json` | Configuration, mode `0600`, owner `ai-monitor` |
+| `/var/lib/ai-monitor/usage.db` | SQLite database (WAL), persistent state |
+| `/home/ai-monitor` | Service account home (Codex socket, Antigravity CLI) |
+| `deploy/ai-monitor.service` | Unit file in this repository |
+
+## Verify the service locally (no install)
+
+```sh
+# Contract smoke check on the loopback port with a temporary data directory.
+python3 -c 'import sys; sys.path.insert(0, ".")'   # run from the checkout
+python3 /tmp/opencode/smoke.py
+```
+
+The smoke check asserts: `/health` lists all four source IDs, `/api/v1/usage`
+returns `observations: []` before any source succeeds, history reports `hours`
+and `truncated`, every response is `Cache-Control: private, no-store`, no
+response contains credential-looking text, and a non-loopback address cannot
+reach the port.
+
+## Install (task 5.2, first time)
+
+```sh
+# 1. Dedicated unprivileged account with its own home.
+sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbin/nologin ai-monitor
+
+# 2. Code and virtualenv, owned by the service account.
+sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
+sudo -u ai-monitor git clone <repo-url> /opt/ai-monitor
+sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+
+# 3. Configuration with credentials, readable only by the service account.
+sudo install -d -m 0750 -o root -g ai-monitor /etc/ai-monitor
+sudo install -m 0640 -o root -g ai-monitor deploy/config.example.json /etc/ai-monitor/config.json
+sudoedit /etc/ai-monitor/config.json   # set the socket path, agy path, keys
+
+# 4. Unit, then start.
+sudo install -m 0644 deploy/ai-monitor.service /etc/systemd/system/ai-monitor.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-monitor
+```
+
+Give the service account its own provider sign-in before expecting data:
+
+```sh
+# Codex: start the app-server as the service account so the control socket exists.
+sudo -u ai-monitor codex app-server daemon start
+sudo -u ai-monitor ls -l /home/ai-monitor/.codex/app-server-control/
+
+# Antigravity: the installed variant on this host has no usage subcommand, so
+# `antigravity` is expected to report `unavailable` (see the capability report).
+```
+
+## Health and logs
+
+```sh
+systemctl status ai-monitor --no-pager
+journalctl -u ai-monitor -n 100 --no-pager
+curl -s http://127.0.0.1:8732/health | python3 -m json.tool
+curl -s http://127.0.0.1:8732/api/v1/version
+```
+
+The log filter redacts credentials, tokens, email addresses, and opaque
+session strings. A credential must never appear in `journalctl` output or in a
+response body:
+
+```sh
+journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
+# Expect no matches.
+```
+
+## Upgrade
+
+```sh
+sudo -u ai-monitor git -C /opt/ai-monitor fetch --tags
+sudo -u ai-monitor git -C /opt/ai-monitor checkout <tag-or-sha>
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+sudo systemctl restart ai-monitor
+systemctl status ai-monitor --no-pager
+```
+
+Schema changes are applied on open; take a backup first (below). A failed
+upgrade is reverted by checking out the previous revision.
+
+## Backup
+
+The only stateful artifact is the SQLite database. Use the online backup so a
+running service stays consistent:
+
+```sh
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".backup '/var/lib/ai-monitor/backup-$(date +%F).db'"
+sudo install -m 0600 -o ai-monitor -g ai-monitor \
+  /var/lib/ai-monitor/backup-$(date +%F).db /var/lib/ai-monitor/backups/
+```
+
+Also back up `/etc/ai-monitor/config.json` to a restricted location (it holds
+credentials) and `deploy/ai-monitor.service`. Never store the config in a
+world-readable directory or a git remote.
+
+Restore:
+
+```sh
+sudo systemctl stop ai-monitor
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".restore '/var/lib/ai-monitor/backups/backup-YYYY-MM-DD.db'"
+sudo systemctl start ai-monitor
+```
+
+## Rollback
+
+```sh
+sudo -u ai-monitor git -C /opt/ai-monitor checkout <previous-good-sha>
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+sudo systemctl restart ai-monitor
+```
+
+If the database schema moved forward, restore the matching backup as well.
+
+## Credential rotation
+
+```sh
+sudoedit /etc/ai-monitor/config.json     # replace openrouter_api_key / management key
+sudo systemctl restart ai-monitor
+curl -s http://127.0.0.1:8732/health | python3 -m json.tool
+```
+
+`openrouter-account` uses `openrouter_management_key` (falling back to
+`openrouter_api_key`); `openrouter-key` always uses `openrouter_api_key`. A
+non-management key calling `/api/v1/credits` returns HTTP 403, which the
+service reports as `operator_action` / `authorization` for the account stream
+while the key stream keeps working.
+
+After rotating, confirm the config file mode is still `0640` (or stricter) and
+that no new secret appears in the journal:
+
+```sh
+sudo stat -c '%a %U:%G' /etc/ai-monitor/config.json
+journalctl -u ai-monitor --since '5 min ago' --no-pager | grep -Ei 'bearer|sk-|@' || true
+```
+
+## Tailscale Serve (task 5.3, pending)
+
+The service binds `127.0.0.1` only. Publication is via Tailscale Serve, never
+Funnel:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:8732
+tailscale serve status
+```
+
+Then restrict access to the intended tailnet identity and devices and confirm
+that a disallowed device is denied, and that `tailscale funnel status` shows
+Funnel disabled. This requires the tailnet access rules and the Mac/iPhone
+devices, so it is executed with the operator present.

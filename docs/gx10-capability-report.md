@@ -92,6 +92,26 @@ stream. Until a key is provided, both streams start in
 `operator_action`/`not_configured` health state. No shared `Retry-After` behavior
 was observed in the 401 responses.
 
+## Local smoke check (executed on this host)
+
+The service was run against this host on a loopback port with a temporary data
+directory, with the real adapters, and the API contract was exercised over
+HTTP. Results:
+
+| Check | Result |
+| --- | --- |
+| `/api/v1/version` | `{"api_version": "1", "service_version": "..."}` |
+| `/health` | `degraded`; `codex` retrying (`unsupported`), `antigravity` unavailable, `openrouter-account` and `openrouter-key` `operator_action` (`not_configured`) |
+| `/api/v1/usage` before any success | `observations: []` |
+| `/api/v1/usage/history?hours=1&limit=5` | `hours: 1`, `truncated: false`, 0 observations |
+| `Cache-Control` on every response | `private, no-store` |
+| Credential-looking text in responses | none |
+| Response latency | ~0.7 ms while providers were failing (API does not poll) |
+| Non-loopback address | refused (Tailscale address `100.x` could not reach the port) |
+
+The soak across an observed reset, the live OpenRouter credential check, and the
+Tailscale access rules remain pending (tasks 5.1-5.3).
+
 ## Tailscale Serve readiness
 
 | Item | Value |

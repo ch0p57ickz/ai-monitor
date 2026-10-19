@@ -1,0 +1,32 @@
+{
+  "api_host": "127.0.0.1",
+  "api_port": 8732,
+  "data_dir": "/var/lib/ai-monitor",
+
+  "scheduler_tick_seconds": 1.0,
+  "deadline": 30.0,
+  "retry_base_delay": 5.0,
+  "retry_max_delay": 300.0,
+  "retry_backoff_factor": 2.0,
+  "retry_jitter": 0.2,
+
+  "codex_interval": 60.0,
+  "codex_app_server_socket": "/home/ai-monitor/.codex/app-server-control/app-server-control.sock",
+  "codex_timeout_seconds": 10,
+
+  "antigravity_interval": 60.0,
+  "antigravity_bin": "/home/ai-monitor/.local/bin/agy",
+  "antigravity_timeout_seconds": 15,
+
+  "openrouter_interval": 300.0,
+  "openrouter_base_url": "https://openrouter.ai",
+  "openrouter_timeout_seconds": 15,
+  "openrouter_api_key": "",
+  "openrouter_management_key": "",
+
+  "retention_days": 30,
+  "history_default_hours": 24,
+  "history_max_hours": 168,
+  "history_default_limit": 100,
+  "history_max_limit": 500
+}
