@@ -53,9 +53,16 @@ class TestCodexFixtures:
             "codex:7d:primary",
             "codex:7d:secondary",
         ]
-        assert windows[0]["used_percent"] == 42.5
+        primary = windows[0]
+        assert primary["used_percent"] == 42.0
+        assert primary["duration_minutes"] == 300
+        assert primary["resets_at"] == "2025-10-09T08:53:20Z"
+        assert windows[1]["duration_minutes"] == 10080
+        assert windows[2]["resets_at"] == "2025-11-07T07:20:00Z"
         # A missing secondary stays unknown rather than being fabricated.
         assert windows[3]["used_percent"] is None
+        assert windows[3]["duration_minutes"] is None
+        assert windows[3]["resets_at"] is None
 
     def test_single_view(self):
         windows = parse_codex_rate_limits(_load("codex_single.json"))
@@ -64,13 +71,18 @@ class TestCodexFixtures:
             "rate-limits:secondary",
         ]
         assert windows[0]["used_percent"] == 25.0
+        assert windows[0]["duration_minutes"] == 300
+        assert windows[0]["resets_at"] == "2025-10-09T08:53:20Z"
 
     def test_missing_secondary_reported_zero_is_kept(self):
         windows = parse_codex_rate_limits(_load("codex_missing_secondary.json"))
         primary = next(w for w in windows if w["id"] == "codex:5h:primary")
         secondary = next(w for w in windows if w["id"] == "codex:5h:secondary")
         assert primary["used_percent"] == 0.0  # a real reported zero
+        assert primary["duration_minutes"] == 300
+        assert primary["resets_at"] == "2025-10-09T08:53:20Z"
         assert secondary["used_percent"] is None
+        assert secondary["resets_at"] is None
 
     def test_changed_shape_falls_back_to_the_single_view(self):
         windows = parse_codex_rate_limits(_load("codex_changed_shape.json"))
@@ -78,6 +90,8 @@ class TestCodexFixtures:
             "rate-limits:primary",
             "rate-limits:secondary",
         ]
+        assert windows[0]["used_percent"] == 10.0
+        assert windows[0]["duration_minutes"] == 300
 
 
 # ---------------------------------------------------------------------------

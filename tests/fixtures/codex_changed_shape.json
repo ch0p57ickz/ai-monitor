@@ -1,4 +1,4 @@
 {
   "rateLimitsByLimitId": ["unexpected", "list", "shape"],
-  "rateLimits": {"primary": {"usedPercent": 10.0, "resetsIn": 900}}
+  "rateLimits": {"primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1760000000}}
 }

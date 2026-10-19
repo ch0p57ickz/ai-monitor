@@ -108,6 +108,20 @@ class TestKeyedView:
         assert windows[0]["duration_minutes"] == 300
         assert windows[0]["label"] == "5h · primary"
 
+    def test_a_reported_but_empty_window_still_gets_the_limit_duration(self):
+        """The limit still identifies the bucket, so its duration applies.
+
+        The used percent stays unknown: only the duration is filled in.
+        """
+        result = {"rateLimitsByLimitId": {"5h": {"primary": {}}}}
+        windows = parse_codex_rate_limits(result)
+        assert windows[0]["used_percent"] is None
+        assert windows[0]["duration_minutes"] == 300
+        assert windows[0]["resets_at"] is None
+        # The absent secondary gets nothing: there is no window to describe.
+        assert windows[1]["duration_minutes"] is None
+        assert windows[1]["label"] == "5h · secondary"
+
     def test_unknown_duration_suffix_keeps_no_duration(self):
         result = {
             "rateLimitsByLimitId": {
@@ -222,6 +236,7 @@ def _serve_once(
     notifications: tuple[dict, ...] = (),
     capture: list | None = None,
     hang: bool = False,
+    hang_after_initialize: bool = False,
 ):
     """Start a one-session app-server on a unix socket; return its thread.
 
@@ -276,6 +291,9 @@ def _serve_once(
                 if capture is not None:
                     capture.append(second)
                 if second is None:
+                    return
+                if hang_after_initialize:
+                    time.sleep(2)
                     return
                 if raw is not None:
                     send(conn, raw)
@@ -344,7 +362,11 @@ class TestHandshake:
         sock = tmp_path / "codex.sock"
         thread = _serve_once(
             sock,
-            {"rateLimits": {"primary": {"usedPercent": 25, "windowDurationMins": 300}}},
+            {
+                "rateLimitsByLimitId": {
+                    "5h": {"primary": {"usedPercent": 25, "windowDurationMins": 300}}
+                }
+            },
             notifications=(
                 {"method": "configWarning", "params": {"summary": "sandbox"}},
                 {"method": "account/updated", "params": {"authMode": "chatgpt"}},
@@ -354,9 +376,107 @@ class TestHandshake:
         out = CodexAdapter().fetch(_config(tmp_path, sock))
         thread.join(timeout=5)
 
-        assert out["notes"]["view"] == "single"
-        assert out["quota_windows"][0]["id"] == "rate-limits:primary"
+        assert out["notes"]["view"] == "keyed"
+        assert out["quota_windows"][0]["id"] == "codex:5h:primary"
         assert out["quota_windows"][0]["used_percent"] == 25.0
+
+    def test_blank_lines_before_the_reply_are_tolerated(self, tmp_path: Path):
+        """Many blank lines must not exhaust the stack (the loop, not recursion)."""
+        sock = tmp_path / "codex.sock"
+        body = {
+            "jsonrpc": "2.0",
+            "id": "usage-1",
+            "result": {"rateLimits": {"primary": {"usedPercent": 7}}},
+        }
+        raw = b"\n" * 5000 + (json.dumps(body) + "\n").encode()
+        thread = _serve_once(sock, raw=raw)
+
+        out = CodexAdapter().fetch(_config(tmp_path, sock))
+        thread.join(timeout=5)
+
+        assert out["quota_windows"][0]["used_percent"] == 7.0
+
+    def test_notification_storm_hits_the_shared_deadline(self, tmp_path: Path):
+        """Complete non-matching lines must not push the read past the deadline.
+
+        Driven at the reader level: an endless stream of complete notification
+        lines never blocks on a recv, so only the per-iteration deadline check
+        can stop it.
+        """
+        import socket as _socket
+
+        from ai_monitor.sources.codex import _ResponseReader
+
+        client, server = _socket.socketpair()
+        stop = threading.Event()
+
+        def flood() -> None:
+            deadline = time.monotonic() + 10
+            payload = (
+                json.dumps({"method": "account/updated", "params": {}}) + "\n"
+            ).encode()
+            try:
+                while not stop.is_set() and time.monotonic() < deadline:
+                    server.sendall(payload)
+            except OSError:
+                pass
+
+        thread = threading.Thread(target=flood, daemon=True)
+        thread.start()
+        reader = _ResponseReader(client, time.monotonic() + 0.5)
+        started = time.monotonic()
+        try:
+            with pytest.raises(CollectionError) as exc_info:
+                reader.read_response("usage-1")
+        finally:
+            stop.set()
+            client.close()
+            server.close()
+        elapsed = time.monotonic() - started
+        thread.join(timeout=5)
+
+        assert exc_info.value.category == "timeout"
+        assert elapsed < 5, "the reader must stop at its deadline, not the flood"
+
+    def test_notification_with_an_error_field_is_not_fatal(self, tmp_path: Path):
+        """A notification is never fatal, even if it carries an error field."""
+        sock = tmp_path / "codex.sock"
+        thread = _serve_once(
+            sock,
+            {"rateLimits": {"primary": {"usedPercent": 3}}},
+            notifications=(
+                {
+                    "method": "configWarning",
+                    "params": {"summary": "sandbox"},
+                    "error": {"message": "benign"},
+                },
+            ),
+        )
+
+        out = CodexAdapter().fetch(_config(tmp_path, sock))
+        thread.join(timeout=5)
+
+        assert out["quota_windows"][0]["used_percent"] == 3.0
+
+    def test_id_less_error_is_surfaced(self, tmp_path: Path):
+        """A JSON-RPC error with no id must not be skipped as a notification."""
+        sock = tmp_path / "codex.sock"
+        raw = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "invalid request"},
+                }
+            )
+            + "\n"
+        ).encode()
+        thread = _serve_once(sock, raw=raw)
+        with pytest.raises(CollectionError) as exc_info:
+            CodexAdapter().fetch(_config(tmp_path, sock))
+        thread.join(timeout=5)
+        assert exc_info.value.category == "internal"
+        assert "invalid request" in str(exc_info.value)
 
     def test_keyed_success(self, tmp_path: Path):
         sock = tmp_path / "codex.sock"
@@ -429,6 +549,20 @@ class TestHandshake:
     def test_timeout(self, tmp_path: Path):
         sock = tmp_path / "codex.sock"
         thread = _serve_once(sock, hang=True)
+        cfg = Config(
+            data_dir=str(tmp_path / "data"),
+            codex_app_server_socket=str(sock),
+            codex_timeout_seconds=1,
+        )
+        with pytest.raises(CollectionError) as exc_info:
+            CodexAdapter().fetch(cfg)
+        thread.join(timeout=5)
+        assert exc_info.value.category == "timeout"
+
+    def test_timeout_after_a_successful_initialize(self, tmp_path: Path):
+        """The deadline is shared across the session, not per request."""
+        sock = tmp_path / "codex.sock"
+        thread = _serve_once(sock, hang_after_initialize=True)
         cfg = Config(
             data_dir=str(tmp_path / "data"),
             codex_app_server_socket=str(sock),

@@ -1,5 +1,5 @@
 {
   "rateLimitsByLimitId": {
-    "5h": {"primary": {"usedPercent": 0.0, "resetsIn": 60}}
+    "5h": {"primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1760000000}}
   }
 }

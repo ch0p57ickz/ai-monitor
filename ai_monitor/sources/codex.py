@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from .. import __version__
 from ..identity import account_identity, derive_account_id
 from .registry import CollectionError, SourceAdapter
 
@@ -41,7 +42,7 @@ INITIALIZE_REQUEST: dict[str, Any] = {
     "id": "init-1",
     "method": "initialize",
     "params": {
-        "clientInfo": {"name": "ai-monitor", "version": "0.1.0"},
+        "clientInfo": {"name": "ai-monitor", "version": __version__},
     },
 }
 
@@ -121,13 +122,20 @@ def _window_entry(
     (integer percent), ``windowDurationMins`` (minutes, nullable), and
     ``resetsAt`` (Unix seconds, nullable). Every field stays ``None`` when the
     app-server does not report it: unknown is never inferred as zero or full.
+
+    The window's own duration is used when reported. A *reported* window that
+    omits it (``{"primary": {}}``) falls back to a duration encoded in the
+    limit ID, because the limit still identifies the bucket; an *absent*
+    window (``primary`` missing or ``null``) gets no duration and no label
+    derived from one, since there is no window to describe. The used percent is
+    never inferred either way.
     """
     raw = window if isinstance(window, dict) else {}
     used = _to_float(raw.get("usedPercent"))
     duration_minutes = _to_float(raw.get("windowDurationMins"))
-    if duration_minutes is None and raw:
-        # The limit-ID suffix is only a fallback for a reported window that
-        # omits its duration; an absent window has no duration at all.
+    if duration_minutes is None and isinstance(window, dict):
+        # A reported window that omits its duration still belongs to a limit
+        # whose ID may encode one; an absent window does not.
         duration_minutes = fallback_duration_minutes
     resets_at = _unix_to_iso(raw.get("resetsAt"))
     return {
@@ -140,8 +148,6 @@ def _window_entry(
         "remaining_percent": None,
         "duration_minutes": duration_minutes,
         "resets_at": resets_at,
-        "reported_used_percent": used,
-        "reported_resets_at": resets_at,
     }
 
 
@@ -270,58 +276,74 @@ class _ResponseReader:
         enough: read until the message carrying our request id arrives.
         """
         while True:
-            message = self._read_message()
-            if message.get("id") != want_id:
-                continue
-            if message.get("error"):
-                detail = message["error"]
-                text = (
-                    detail.get("message", "rpc error")
-                    if isinstance(detail, dict)
-                    else str(detail)
-                )
+            if time.monotonic() >= self._deadline:
                 raise CollectionError(
-                    "internal", f"codex app-server rpc error: {text}"
+                    "timeout", "codex app-server did not respond in time"
                 )
+            message = self._read_message()
+            message_id = message.get("id")
+            if (
+                "method" not in message
+                and message.get("error") is not None
+                and message_id in (None, want_id)
+            ):
+                # An id-less error is how JSON-RPC reports a rejected request
+                # (parse error / invalid request). Surface it: waiting for the
+                # matching reply would block until the deadline. A message with
+                # a ``method`` is a notification and is never fatal.
+                raise _rpc_error(message["error"])
+            if message_id != want_id:
+                continue
             return message.get("result")
 
     def _read_message(self) -> dict[str, Any]:
-        while b"\n" not in self._buffer:
-            remaining = self._deadline - time.monotonic()
-            if remaining <= 0:
-                raise CollectionError(
-                    "timeout", "codex app-server did not respond in time"
-                )
-            self._sock.settimeout(remaining)
+        while True:
+            while b"\n" not in self._buffer:
+                remaining = self._deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CollectionError(
+                        "timeout", "codex app-server did not respond in time"
+                    )
+                self._sock.settimeout(remaining)
+                try:
+                    chunk = self._sock.recv(65536)
+                except socket.timeout:
+                    raise CollectionError(
+                        "timeout", "codex app-server did not respond in time"
+                    )
+                if not chunk:
+                    raise CollectionError(
+                        "network", "codex app-server closed the connection"
+                    )
+                self._buffer += chunk
+                if len(self._buffer) > _MAX_RESPONSE_BYTES:
+                    raise CollectionError(
+                        "invalid_response", "codex app-server response too large"
+                    )
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            if not line.strip():
+                # Keep-alive/blank lines are tolerated, not recursed on.
+                continue
             try:
-                chunk = self._sock.recv(65536)
-            except socket.timeout:
+                message = json.loads(line)
+            except json.JSONDecodeError:
                 raise CollectionError(
-                    "timeout", "codex app-server did not respond in time"
+                    "invalid_response", "codex app-server returned non-JSON data"
                 )
-            if not chunk:
+            if not isinstance(message, dict):
                 raise CollectionError(
-                    "network", "codex app-server closed the connection"
+                    "invalid_response", "codex app-server response is not an object"
                 )
-            self._buffer += chunk
-            if len(self._buffer) > _MAX_RESPONSE_BYTES:
-                raise CollectionError(
-                    "invalid_response", "codex app-server response too large"
-                )
-        line, self._buffer = self._buffer.split(b"\n", 1)
-        if not line.strip():
-            return self._read_message()
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            raise CollectionError(
-                "invalid_response", "codex app-server returned non-JSON data"
-            )
-        if not isinstance(message, dict):
-            raise CollectionError(
-                "invalid_response", "codex app-server response is not an object"
-            )
-        return message
+            return message
+
+
+def _rpc_error(detail: Any) -> CollectionError:
+    text = (
+        detail.get("message", "rpc error")
+        if isinstance(detail, dict)
+        else str(detail)
+    )
+    return CollectionError("internal", f"codex app-server rpc error: {text}")
 
 
 def _rpc_call(socket_path: str, timeout: float) -> Any:

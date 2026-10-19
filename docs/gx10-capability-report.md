@@ -33,9 +33,11 @@ persistent data directory).
 | Rate-limit fields | `rateLimitsByLimitId` (keyed) with a `rateLimits` single-view mirror; each snapshot has `primary`/`secondary` `RateLimitWindow` objects carrying `usedPercent` (integer), `windowDurationMins`, and `resetsAt` (Unix seconds). `accountId` is defined but was absent in the live payload |
 
 Live evidence (`tools/codex_live_check.py`, bridged stdio app-server, real
-account): `view: keyed`, two windows — `5h · primary` 4% used with
-`expectedUsedPercent` 66.93 → `under`, and `7d · secondary` 22% used with
-`expectedUsedPercent` 26.96 → `at`; `accountId` null.
+account, snapshot 2026-10-19): `view: keyed`, two windows — `5h · primary`
+at 14% used against `expectedUsedPercent` 69.45 → `under`, and `7d ·
+secondary` at 23% used against `expectedUsedPercent` 27.03 → `at`;
+`accountId` was null in the live payload. Percentages move with use; the
+classification and the presence of real reset bounds are the point.
 
 Verdict: capable. The adapter protocol is verified against the live app-server;
 on this host it must be reached through a working app-server transport because
