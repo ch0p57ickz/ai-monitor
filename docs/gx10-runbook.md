@@ -156,11 +156,17 @@ The JSON Lines log is the raw evidence; results are recorded in
 sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbin/nologin ai-monitor
 
 # 2. Code and virtualenv, owned by the service account.
-# A clone only works if the checkout has a remote; this repository does not, so
-# copy the working checkout instead of inventing a URL. `git clone` of a local
-# path gives a clean tree without the operator's build artifacts.
+# Copy the checkout as root. The obvious form fails for two reasons: the service
+# account cannot traverse the operator's home (0750 on this host), so
+# `sudo -u ai-monitor git clone /path/to/checkout` is denied; and there is no
+# remote to clone from, since this repository has none. rsync also sidesteps git's
+# dubious-ownership check, which a root-run git inside an ai-monitor-owned tree
+# trips. `--exclude venv` matters: without it --delete would remove the virtualenv
+# that lives inside this directory.
 sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
-sudo -u ai-monitor git clone /path/to/this/checkout /opt/ai-monitor
+sudo rsync -a --delete --exclude .git --exclude __pycache__ --exclude venv \
+  /path/to/this/checkout/ /opt/ai-monitor/
+sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 
@@ -317,8 +323,14 @@ journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
 ## Upgrade
 
 ```sh
-sudo -u ai-monitor git -C /opt/ai-monitor fetch --tags
-sudo -u ai-monitor git -C /opt/ai-monitor checkout <tag-or-sha>
+# Copy the revision you want into place, as root, then hand it back to the
+# service account. The service account cannot reach the operator's checkout, and
+# a root-run git inside an ai-monitor-owned tree trips git's dubious-ownership
+# check, so rsync is the form that works without extra configuration. `--exclude
+# venv` keeps --delete from removing the virtualenv inside this directory.
+sudo rsync -a --delete --exclude .git --exclude __pycache__ --exclude venv \
+  /path/to/this/checkout/ /opt/ai-monitor/
+sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 # Without network access, install a wheel built as described under "Installing
 # without network access" instead. Do not add --system-site-packages to the venv
@@ -332,6 +344,15 @@ systemctl status ai-monitor --no-pager
 # packaging 0.2.0 over 0.1.0 and back.
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 curl -s http://127.0.0.1:8732/api/v1/version
+```
+
+With git history on the host instead of an rsync copy, run the git steps as root
+and hand the tree back, since the service account cannot reach the source:
+
+```sh
+sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor fetch --tags
+sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor checkout <tag-or-sha>
+sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 ```
 
 Schema changes are applied on open; take a backup first (below). A failed
