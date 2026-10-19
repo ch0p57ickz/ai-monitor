@@ -210,11 +210,11 @@ class CodexAdapter(SourceAdapter):
             raise exc.error
 
         windows = parse_codex_rate_limits(result)
-        notes: dict[str, Any] = {"view": "single"}
-        if isinstance(result, dict) and isinstance(result.get("rateLimitsByLimitId"), dict):
-            notes["view"] = "keyed"
-        elif isinstance(result, dict) and isinstance(result.get("rateLimits"), dict):
-            notes["view"] = "single"
+        # Mirror the parser's branch predicate exactly (non-empty keyed dict),
+        # so the diagnostic label never disagrees with the data.
+        keyed = result.get("rateLimitsByLimitId") if isinstance(result, dict) else None
+        view = "keyed" if isinstance(keyed, dict) and keyed else "single"
+        notes: dict[str, Any] = {"view": view}
 
         return {
             "status": "success",

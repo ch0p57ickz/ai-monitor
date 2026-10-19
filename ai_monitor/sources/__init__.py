@@ -1,8 +1,8 @@
 """Source adapter registry and collection primitives."""
 
+from .codex import CodexAdapter
 from .registry import (
     AntigravityAdapter,
-    CodexAdapter,
     CollectionError,
     OpenRouterAccountAdapter,
     OpenRouterKeyAdapter,

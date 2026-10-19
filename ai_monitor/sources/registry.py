@@ -45,50 +45,6 @@ class UnavailableAdapter(SourceAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Codex (JSON-RPC over the app-server unix socket)
-# ---------------------------------------------------------------------------
-
-
-class CodexAdapter(SourceAdapter):
-    def fetch(self, config: "Config") -> dict[str, Any]:
-        if not config.codex_app_server_socket:
-            raise CollectionError("unavailable", "codex app-server socket not configured or found")
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "usage-1",
-            "method": "account/get",
-            "params": {},
-        }
-
-        import socket
-
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(config.codex_timeout_seconds)
-            sock.connect(config.codex_app_server_socket)
-            sock.sendall((json.dumps(payload) + "\n").encode())
-            data = b""
-            while b"\n" not in data:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            sock.close()
-            response = json.loads(data.split(b"\n", 1)[0])
-        except FileNotFoundError:
-            raise CollectionError("unavailable", "codex app-server socket missing")
-        except TimeoutError:
-            raise CollectionError("timeout", "codex app-server did not respond in time")
-        except (OSError, json.JSONDecodeError) as exc:
-            raise CollectionError("unknown", f"codex app-server error: {exc}")
-
-        if "error" in response:
-            raise CollectionError("unknown", response["error"].get("message", "rpc error"))
-        return response.get("result", {})
-
-
-# ---------------------------------------------------------------------------
 # Antigravity (agy CLI, session-scoped)
 # ---------------------------------------------------------------------------
 
@@ -172,6 +128,10 @@ class OpenRouterKeyAdapter(SourceAdapter):
 
 
 def default_registry() -> Dict[str, type[SourceAdapter]]:
+    # Imported lazily: ``codex`` depends on this module for CollectionError
+    # and SourceAdapter, so a module-level import here would be circular.
+    from .codex import CodexAdapter
+
     return {
         "codex": CodexAdapter,
         "antigravity": AntigravityAdapter,

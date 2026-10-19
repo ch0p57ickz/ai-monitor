@@ -17,9 +17,9 @@ from ai_monitor.models import (
     SourceStatus,
 )
 from ai_monitor.state import UsageWorker
+from ai_monitor.sources.codex import CodexAdapter
 from ai_monitor.sources.registry import (
     AntigravityAdapter,
-    CodexAdapter,
     CollectionError,
     OpenRouterAccountAdapter,
     OpenRouterKeyAdapter,

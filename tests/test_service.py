@@ -21,9 +21,9 @@ from ai_monitor.config import Config
 from ai_monitor.db import Database
 from ai_monitor.http import UsageServer, serve_http
 from ai_monitor.models import SourceStatus, get_source_def, normalize_observation
+from ai_monitor.sources.codex import CodexAdapter
 from ai_monitor.sources.registry import (
     AntigravityAdapter,
-    CodexAdapter,
     CollectionError,
     OpenRouterAccountAdapter,
     OpenRouterKeyAdapter,
@@ -583,11 +583,20 @@ class TestRegistry:
         assert reg["codex"] is CustomAdapter
         assert reg["antigravity"] is AntigravityAdapter
 
-    def test_codex_adapter_missing_socket(self, sample_config: Config):
+    def test_codex_adapter_no_socket_configured(self, sample_config: Config):
         adapter = CodexAdapter()
         with pytest.raises(CollectionError) as exc_info:
             adapter.fetch(sample_config)
-        assert exc_info.value.category == "unavailable"
+        assert exc_info.value.category == "not_configured"
+
+    def test_codex_adapter_socket_absent(self, sample_config: Config, tmp_path):
+        cfg = dataclasses.replace(
+            sample_config, codex_app_server_socket=str(tmp_path / "missing.sock")
+        )
+        adapter = CodexAdapter()
+        with pytest.raises(CollectionError) as exc_info:
+            adapter.fetch(cfg)
+        assert exc_info.value.category == "unsupported"
 
     def test_openrouter_adapter_no_key(self, sample_config: Config):
         adapter = OpenRouterAccountAdapter()
