@@ -200,6 +200,7 @@ serves the cached observation. All of it passes on this host.
 | Restore after losing the database and its sidecars (`.restore`) | Pass — `pragma integrity_check` reports `ok`, and every row matches the capture |
 | A restart on the restored database serves cached data (5.2) | Pass — `/api/v1/usage` returns the restored observation |
 | The example config loads through the real `Config` | Pass — and now covers every field the loader accepts |
+| The upgrade and rollback commands, in a scratch tree | Pass — the allowlist copy installs, and `pip show` and `--version` follow the tree through a bump and back (see the stale `build/` finding below) |
 
 ### Finding: the documented backup command failed
 
@@ -296,13 +297,61 @@ masking present:                  True
 The value is masked rather than dropped, so the field still reports that the
 provider sent something while withholding what it was.
 
+### Finding: an upgrade can install code from the previous revision
+
+`pip install <tree>` builds in place, and setuptools reuses the `build/` directory
+it leaves behind. A module deleted or renamed in the new revision stays in
+`build/lib/` and is packaged again, so the installed package can carry code from
+the revision before it. Rehearsed on this host, in a scratch tree built by the
+runbook's own allowlist copy:
+
+```text
+$ pip install <tree>                            # 0.1.0
+$ echo SENTINEL > <tree>/ai_monitor/sentinel.py
+$ pip install <tree>                            # sentinel is now in build/lib/
+$ rm <tree>/ai_monitor/sentinel.py
+$ pip install <tree>
+$ test -f <venv>/site-packages/ai_monitor/sentinel.py && echo stale
+stale
+```
+
+A wheel built from that tree contained the deleted module, and removing `build/`
+before the build produced a clean wheel. The deployed tree is in exactly this
+state: `/opt/ai-monitor/build` and `/opt/ai-monitor/ai_monitor.egg-info` exist.
+The rsync cannot clear them either, because `--exclude '*'` protects excluded
+paths from `--delete`, so the staleness would survive every upgrade. The install,
+upgrade, and rollback steps now clear `build/` before installing, and
+`tests/test_runbook_install.py` holds each of them to it.
+
+The same rehearsal confirmed the rest of the procedure: the allowlist copy
+produces a tree that installs, `pip show` and `--version` follow the tree through
+a version bump and back, and a code-only change with the version unchanged also
+reinstalls, because pip uninstalls the old copy first.
+
+### Finding: the rollback command cannot run on the deployed layout
+
+The rollback step ran `sudo -u ai-monitor git -C /opt/ai-monitor checkout
+<previous-good-sha>`. Both halves fail. The deployed tree carries no `.git` — the
+allowlist copy leaves it out on purpose — so `/opt/ai-monitor` is not a
+repository and `git -C /opt/ai-monitor` answers "not a git repository". It also
+ran as the service account, which cannot reach the operator's checkout; the
+install section already documented that limitation for `git clone`.
+
+The section now names the layout it applies to. On an rsync deployment the earlier
+revision comes from the operator's checkout and the Upgrade copy and install steps
+repeat. With git history on the host, the git steps run as root with
+`safe.directory` and the tree goes back to the service account.
+`tests/test_runbook_install.py` rejects any git command against the deployed tree
+that does not run as root with `safe.directory`.
+
 Still outstanding for 5.2 and 5.4, all needing the host:
 
 - installing the unit and confirming it starts under systemd;
 - a `systemctl restart` (the check above restarts the process, not the unit);
 - the journal redaction check, since `journalctl` only knows installed units;
-- verifying the upgrade, rollback and rotation procedures against the deployed
-  layout once it exists.
+- running the upgrade, rollback and rotation steps against the deployed tree
+  itself, once the service runs — the commands are rehearsed below, but none has
+  been executed as root on this host.
 
 ## Tailscale Serve readiness
 

@@ -119,6 +119,32 @@ def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
         )
 
 
+def test_every_in_tree_install_clears_the_stale_build_directory():
+    """`pip install <dir>` reuses the `build/` it leaves, so deletions survive.
+
+    Verified on this host: install a tree, add a module, install again, delete the
+    module from the tree, then reinstall — the module was still installed, because
+    setuptools had kept it in `build/lib/`. The rsync cannot clear it either, since
+    excluded paths survive `--delete`. So every in-tree install clears `build/`
+    first: the install step, the upgrade step, and the rollback's git form.
+    """
+    installing = [
+        block
+        for block in _shell_blocks(RUNBOOK.read_text("utf-8"))
+        if "pip install /opt/ai-monitor" in block
+    ]
+    assert len(installing) == 3, (
+        f"install, upgrade and rollback should each install in-tree: {len(installing)}"
+    )
+    for block in installing:
+        cleared = block.find("rm -rf /opt/ai-monitor/build")
+        installed = block.find("pip install /opt/ai-monitor")
+        assert 0 <= cleared < installed, (
+            "an in-tree install must clear build/ first, or a module the previous "
+            "revision deleted stays packaged:\n" + block
+        )
+
+
 def test_the_config_check_runs_as_the_service_account():
     """A root check passes regardless of what the service will see.
 

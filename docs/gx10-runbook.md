@@ -185,6 +185,14 @@ sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree"
 
 sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
+
+# Clear build artifacts from any earlier install on this tree. `pip install <dir>`
+# reuses the `build/` directory it leaves, so a module deleted since then would be
+# packaged again; the rsync cannot clear it, because excluded paths survive
+# --delete. There is nothing to clear on a first install, and the step is safe to
+# repeat.
+sudo rm -rf /opt/ai-monitor/build
+
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 
 # Confirm the console script is on PATH inside the venv before going further.
@@ -381,6 +389,17 @@ sudo rsync -a --delete \
   /path/to/this/checkout/ /opt/ai-monitor/
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree"
+
+# Clear the build artifacts first. `pip install <dir>` builds in place, and
+# setuptools reuses the `build/` directory it leaves behind: a module deleted or
+# renamed in this revision stays in `build/lib/` and is packaged again, so the
+# installed package can carry code from the previous revision. The rsync above
+# cannot clear it, because excluded paths survive --delete. Verified on this host
+# by installing a tree, adding a module, installing again, deleting the module
+# from the tree, and finding a reinstall still contained it; removing `build/`
+# first made the same reinstall clean.
+sudo rm -rf /opt/ai-monitor/build
+
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 # Without network access, install a wheel built as described under "Installing
 # without network access" instead. Do not add --system-site-packages to the venv
@@ -499,6 +518,9 @@ back to the service account:
 sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor fetch --tags
 sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor checkout <previous-good-sha>
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
+# Same staleness rule as the upgrade: setuptools reuses `build/`, so clear it or a
+# module the earlier revision deleted stays packaged.
+sudo rm -rf /opt/ai-monitor/build
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 sudo systemctl restart ai-monitor
 ```
