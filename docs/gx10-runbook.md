@@ -156,17 +156,34 @@ The JSON Lines log is the raw evidence; results are recorded in
 sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbin/nologin ai-monitor
 
 # 2. Code and virtualenv, owned by the service account.
-# Copy the checkout as root. The obvious form fails for two reasons: the service
-# account cannot traverse the operator's home (0750 on this host), so
-# `sudo -u ai-monitor git clone /path/to/checkout` is denied; and there is no
-# remote to clone from, since this repository has none. rsync also sidesteps git's
-# dubious-ownership check, which a root-run git inside an ai-monitor-owned tree
-# trips. `--exclude venv` matters: without it --delete would remove the virtualenv
-# that lives inside this directory.
+#
+# Copy with an allowlist, not a denylist. The checkout holds a `.env` at mode
+# 0664, and a plain `rsync -a` of the tree copies it into this 0755 directory,
+# where it is readable by every local user — rehearsed, and it leaks. Naming what
+# to copy fails safe instead: a new secret file is not copied unless it is named,
+# whereas one missing from a denylist leaks silently.
+#
+# The copy runs as root for two reasons: the service account cannot traverse the
+# operator's home (0750 on this host), so `sudo -u ai-monitor git clone` is denied
+# before it starts; and there is no remote to clone from, since this repository has
+# none. rsync also sidesteps git's dubious-ownership check, which a root-run git
+# inside an ai-monitor-owned tree trips.
+#
+# `--exclude '*'` is what protects the virtualenv: rsync treats excluded paths as
+# protected from --delete, so `venv/` survives an upgrade while a module removed
+# from the package does not.
 sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
-sudo rsync -a --delete --exclude .git --exclude __pycache__ --exclude venv \
+sudo rsync -a --delete \
+  --include '/ai_monitor/***' --include '/deploy/***' --include '/docs/***' \
+  --include '/tools/***' --include '/pyproject.toml' \
+  --exclude '*' \
   /path/to/this/checkout/ /opt/ai-monitor/
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
+
+# Confirm nothing secret came along. Anything that reaches this tree is readable
+# by every local user, and this repository's `.env` is the file to expect.
+sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree"
+
 sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 
@@ -324,13 +341,19 @@ journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
 
 ```sh
 # Copy the revision you want into place, as root, then hand it back to the
-# service account. The service account cannot reach the operator's checkout, and
-# a root-run git inside an ai-monitor-owned tree trips git's dubious-ownership
-# check, so rsync is the form that works without extra configuration. `--exclude
-# venv` keeps --delete from removing the virtualenv inside this directory.
-sudo rsync -a --delete --exclude .git --exclude __pycache__ --exclude venv \
+# service account. Same allowlist as the install: a denylist would copy the
+# checkout's `.env` into this tree, where it is readable by every local user. The
+# service account cannot reach the operator's checkout, and a root-run git inside
+# an ai-monitor-owned tree trips git's dubious-ownership check, so rsync is the
+# form that works without extra configuration. `--exclude '*'` protects `venv/`
+# from --delete.
+sudo rsync -a --delete \
+  --include '/ai_monitor/***' --include '/deploy/***' --include '/docs/***' \
+  --include '/tools/***' --include '/pyproject.toml' \
+  --exclude '*' \
   /path/to/this/checkout/ /opt/ai-monitor/
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
+sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree"
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 # Without network access, install a wheel built as described under "Installing
 # without network access" instead. Do not add --system-site-packages to the venv

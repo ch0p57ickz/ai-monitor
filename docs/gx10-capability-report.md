@@ -488,6 +488,36 @@ the system site-packages on the venv's path, so pip treats a system-wide
 version in place — precisely the silent failed upgrade this section is about. The
 runbook uses the wheel form and warns against the venv flag.
 
+### Finding: the install command copied `.env` into the deployment tree
+
+Rehearsing the copy step against a scratch destination — not reading the file, just
+checking what lands — showed `rsync -a` of the checkout brings `.env` along. In
+this repository `.env` is mode **0664**, and `/opt/ai-monitor` is **0755**, so the
+operator's credentials would sit world-readable on the deployed host. The service
+never reads that file; the credentials it uses live in `/etc/ai-monitor/config.json`
+at `0640 root:ai-monitor`.
+
+The step now names what to copy instead of what to skip:
+
+```sh
+sudo rsync -a --delete \
+  --include '/ai_monitor/***' --include '/deploy/***' --include '/docs/***' \
+  --include '/tools/***' --include '/pyproject.toml' \
+  --exclude '*' \
+  /path/to/this/checkout/ /opt/ai-monitor/
+```
+
+Rehearsed: the destination then holds exactly `ai_monitor/`, `deploy/`, `docs/`,
+`tools/`, `pyproject.toml`, and the pre-existing `venv/`. `.env` and `.gitignore`
+do not arrive, a module deleted from the package does not survive, and the venv
+does, because rsync treats excluded paths as protected from `--delete`.
+
+The allowlist is deliberate. A denylist fails open — the file that matters is the
+one nobody thought to exclude. An allowlist fails safe: its failure mode is a
+missing file, which is loud, rather than a disclosed secret, which is silent.
+`tests/test_runbook_install.py` holds both copy steps (install and upgrade) to that
+shape, and each step now asserts `test ! -e /opt/ai-monitor/.env` afterwards.
+
 ### Finding: the reported version had two sources, and they drifted
 
 `__version__` was hardcoded in `ai_monitor/__init__.py` while `pyproject.toml`
