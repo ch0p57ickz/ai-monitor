@@ -473,10 +473,42 @@ the unit installed under systemd.
 
 ## Rollback
 
+Rollback is the upgrade with an earlier revision, so the copy, install, and
+restart steps are the ones above. What differs is how the earlier revision gets
+into place.
+
+**The deployed tree carries no git history.** The allowlist copy leaves `.git`
+out on purpose (it is not in the include list), so `/opt/ai-monitor` is not a
+repository and `git -C /opt/ai-monitor` fails there. It also cannot run as the
+service account: that account cannot reach the source checkout. On this layout,
+check out the earlier revision in the operator's own checkout and repeat the
+Upgrade copy and install steps against it:
+
 ```sh
-sudo -u ai-monitor git -C /opt/ai-monitor checkout <previous-good-sha>
+cd /path/to/this/checkout
+git checkout <previous-good-sha>
+# Then repeat the rsync, chown, pip install, and restart steps under Upgrade.
+```
+
+With git history on the host instead — a tree that was cloned rather than
+copied — the git steps run as root, because a root-run git inside an
+ai-monitor-owned tree trips git's dubious-ownership check, and then the tree goes
+back to the service account:
+
+```sh
+sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor fetch --tags
+sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor checkout <previous-good-sha>
+sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
 sudo systemctl restart ai-monitor
+```
+
+Either way, confirm the running release is the one you intended. A service that
+still announces the newer version means the install did not replace the package:
+
+```sh
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
+curl -s http://127.0.0.1:8732/api/v1/version
 ```
 
 If the database schema moved forward, restore the matching backup as well.

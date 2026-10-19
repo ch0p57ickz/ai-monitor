@@ -89,6 +89,36 @@ def test_both_copy_steps_check_for_a_leaked_env():
         )
 
 
+def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
+    """`git -C /opt/ai-monitor` cannot work there, and not as that account.
+
+    Verified on the host: the deployed tree is an allowlist copy, so it carries no
+    `.git` and `git -C /opt/ai-monitor` fails with "not a git repository". It also
+    cannot run as the service account, which cannot reach the operator's checkout.
+    A root-run git inside an ai-monitor-owned tree trips git's dubious-ownership
+    check, so every git invocation against the deployed tree names
+    `safe.directory` and runs as root.
+    """
+    text = RUNBOOK.read_text("utf-8")
+    commands = [
+        line.strip()
+        for block in _shell_blocks(text)
+        for line in block.splitlines()
+        if "-C /opt/ai-monitor" in line
+        or line.strip().startswith("sudo -u ai-monitor git")
+    ]
+    assert commands, "the runbook should still document the git-deployed path"
+    for command in commands:
+        assert command.startswith("sudo git "), (
+            f"git against the deployed tree runs as root, not as the service "
+            f"account: {command}"
+        )
+        assert "safe.directory=/opt/ai-monitor" in command, (
+            f"a root-run git inside an ai-monitor-owned tree needs "
+            f"safe.directory: {command}"
+        )
+
+
 def test_the_config_check_runs_as_the_service_account():
     """A root check passes regardless of what the service will see.
 
