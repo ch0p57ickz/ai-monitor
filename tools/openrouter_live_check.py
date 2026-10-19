@@ -152,14 +152,8 @@ def main() -> int:
     print()
     print(f"collected: {ok or 'none'}")
     print(f"failed:    {failed or 'none'}")
-    if ok and failed:
-        print("partial: one stream collected while the other failed (expected for "
-              "an inference key against the credit balance)")
-    if not management and inference:
-        print(
-            "note: no management key was set, so the account-credit stream falls "
-            "back to the inference key and may report `authorization`"
-        )
+    for note in _explain(outcomes, management=bool(management), inference=bool(inference)):
+        print(note)
     if any_leak:
         print()
         print("FAIL: a credential appeared in an observation payload")
@@ -171,6 +165,64 @@ def main() -> int:
     print()
     print("live openrouter check complete")
     return 0
+
+
+def _explain(
+    outcomes: dict[str, dict[str, Any]], *, management: bool, inference: bool
+) -> list[str]:
+    """Explain an asymmetric result from what was observed, not from a template.
+
+    The two streams need different credentials — account credits need a
+    management/provisioning key, current-key usage needs its own key — so the
+    interesting cases are the ones where exactly one is configured. Saying which
+    one is missing is the whole value of the check.
+    """
+    notes: list[str] = []
+    account = outcomes.get("openrouter-account", {})
+    key = outcomes.get("openrouter-key", {})
+    account_ok = account.get("status") == "success"
+    key_ok = key.get("status") == "success"
+
+    if account_ok and not key_ok:
+        notes.append(
+            "partial: the account-credit stream collected while the current-key "
+            "stream did not, and each keeps its own health"
+        )
+    elif key_ok and not account_ok:
+        notes.append(
+            "partial: the current-key stream collected while the account-credit "
+            "stream did not, and each keeps its own health"
+        )
+    elif not account_ok and not key_ok:
+        notes.append("neither stream collected; see the error categories above")
+
+    if not inference and key.get("errorCategory") == "not_configured":
+        notes.append(
+            "note: the current-key stream needs its own key credential "
+            "(OPENROUTER_API_KEY). A management key covers account credits only, "
+            "so this stream reports `not_configured` until one is set — the spec "
+            "expects a stream to be unavailable when the available credential "
+            "cannot call it"
+        )
+    if not management and account.get("errorCategory") == "not_configured":
+        notes.append(
+            "note: the account-credit stream has no management/provisioning key "
+            "(OPENROUTER_MGMT_KEY), so it falls back to the inference key and now "
+            "has none either"
+        )
+    elif not management and account_ok:
+        notes.append(
+            "note: no management key was set, so the account-credit stream used "
+            "the inference key; its balance is available but a stricter "
+            "deployment would use a provisioning key"
+        )
+    elif not management and account.get("errorCategory") == "authorization":
+        notes.append(
+            "note: no management key was set, so the account-credit stream fell "
+            "back to the inference key and was refused — that is the documented "
+            "split where only the current-key stream succeeds"
+        )
+    return notes
 
 
 if __name__ == "__main__":

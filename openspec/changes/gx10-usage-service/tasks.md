@@ -28,7 +28,7 @@
 
 ## 5. GX10 deployment and acceptance
 
-- [ ] 5.1 Run local smoke checks and a GX10 soak period across an observed reset or representative shorter interval; verify first-failure omission, partial OpenRouter results, correct freshness, bounded history, independent failures, and API latency independent of provider polls.
+- [x] 5.1 Run local smoke checks and a GX10 soak period across an observed reset or representative shorter interval; verify first-failure omission, partial OpenRouter results, correct freshness, bounded history, independent failures, and API latency independent of provider polls. (Verified 2026-10-19; evidence in `docs/gx10-capability-report.md`. The OpenRouter current-key stream's success path was exercised with an invalid key and by unit tests, not a real inference key.)
 - [ ] 5.2 Install the service under a dedicated unprivileged account with persistent storage, credential access, and automatic restart; verify a restart preserves cached data and no secret appears in logs or responses.
 - [ ] 5.3 Configure Tailscale Serve HTTPS and tailnet identity/device rules without Funnel; verify access from the intended Mac and iPhone and denial from a disallowed device, and confirm widget response sizes remain within the configured cap.
 - [ ] 5.4 Document GX10-specific start, upgrade, backup, rollback, and credential-rotation commands; verify each command or procedure against the deployed host configuration.

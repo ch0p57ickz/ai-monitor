@@ -73,10 +73,30 @@ also treated as `unavailable`.
 ## OpenRouter endpoints
 
 The two current-key endpoints were probed **without credentials** to record error
-categories. The account-credit endpoint requires a credential and is listed for
-completeness only. No OpenRouter credential is configured on this host yet:
-`envget -s` (name-only listing) shows no OpenRouter credential variable, and the
-process environment contains no OpenRouter key.
+categories. The account-credit endpoint requires a credential, so it is verified
+through `tools/openrouter_live_check.py`, which reads credentials from the
+environment only and never prints them.
+
+Live result (2026-10-19, a management/provisioning key in `OPENROUTER_MGMT_KEY`,
+no inference key):
+
+| Stream | Endpoint | Result |
+| --- | --- | --- |
+| `openrouter-account` | `/api/v1/credits` | `success` — `totalCreditsUsd: 530.0`, `totalUsageUsd: 474.663`, `remainingUsd: 55.337`, with `limitUsd`, `usedUsd`, `resetsAt` all `null` and pace `unknown`/`none` |
+| `openrouter-key` | `/api/v1/key` | `failed` — `not_configured` ("openrouter api key not configured"), its own health independent of the account stream |
+
+That is the partial result the spec asks for: the account stream collected while
+the current-key stream could not be called with the available credential, and
+each kept its own status, error category, and freshness. The nulls matter too —
+an absent credit limit and an absent per-key budget stay `null`, never inferred
+as zero or full. With an inference key instead, the documented split reverses
+(only the current-key stream succeeds); that direction is covered by unit tests
+and by the invalid-key `authentication` probe rather than by a live run.
+
+The two streams need different credentials by design, so a single-credential
+deployment shows one stream `not_configured` rather than a fabricated value.
+The spec requires exactly this: a successful result from either endpoint remains
+available when the other "cannot be called with the available credential".
 
 Account identity: neither OpenRouter endpoint exposes an identity that is safe to
 store (the key payload's `label` may be a name or email), so `accountId` stays
@@ -127,8 +147,9 @@ HTTP. Results:
 | Response latency | ~0.7 ms while providers were failing (API does not poll) |
 | Non-loopback address | refused (Tailscale address `100.x` could not reach the port) |
 
-The soak across an observed reset, the live OpenRouter credential check, and the
-Tailscale access rules remain pending (tasks 5.1-5.3).
+Live evidence now exists for the soak across an observed reset and for the
+OpenRouter split; the Tailscale access rules and the systemd install remain
+pending (tasks 5.2-5.4).
 
 ## Tailscale Serve readiness
 
@@ -152,7 +173,7 @@ Both tools run against this host's real providers; neither reads credentials.
 | Codex collection through stdio | `tools/soak_check.py`, `tools/codex_live_check.py` | Pass — real account data, no collection failures over 150 s |
 | Soak across an observed reset | `tools/reset_watch.py` (50 min) | Pass — the Codex 5h window turned over at 2026-10-19T19:37:35Z; the next sample reported `usedPercent: 0.0` with a new `resetsAt` and pace recomputed to the **new** window (`expectedUsedPercent: 0.0`), not the window that just ended (which would read ~100) |
 | Pace refuses a clock-tracking boundary | `tools/reset_watch.py` (4 min) | Pass — after the reset the app-server reported `resetsAt` as `now + 5h` on every poll (~61 s per 60 s poll), and pace is now `unknown` instead of a fabricated `at` |
-| Partial OpenRouter results | `tools/openrouter_live_check.py` | **Not verified** — needs a real credential |
+| Partial OpenRouter results | `tools/openrouter_live_check.py` | Pass — with a management key and no inference key, `openrouter-account` collected real credits while `openrouter-key` reported `not_configured`, each with its own health; absent credit fields stayed `null` |
 
 ### Finding: a window end that tracks the clock
 
@@ -168,10 +189,12 @@ implausible. Had the account been in use, the same drift would have produced a
 permanent false `over` instead. Fixed in commit `2577656`; the check compares the
 most recent prior snapshot only, since the rule is about consecutive snapshots.
 
-Not yet verified: partial OpenRouter results, which need a usable credential on
-this host. `tools/openrouter_live_check.py` runs both streams and reports each
-one's status and error category without printing the credential; it exits `2`
-when no credential is present.
+Every check in this table now has live evidence. The one qualification: the
+current-key stream's *success* path was exercised with an invalid key
+(`authentication`) and by unit tests, not with a real inference key, because
+only a management key is available on this host. `tools/openrouter_live_check.py`
+runs both streams and reports each one's status and error category without
+printing the credential; it exits `2` when no credential is present.
 
 ## Capability summary for adapter enablement
 

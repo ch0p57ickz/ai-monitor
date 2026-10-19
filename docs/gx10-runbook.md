@@ -72,9 +72,19 @@ PYTHONPATH=. python3 tools/openrouter_live_check.py
 It reports each stream's status, its error category, and its budget fields, then
 asserts that at least one stream collected and that no credential appeared in an
 observation payload. Exit codes: `0` collected, `2` no credential present (a
-configuration problem), `1` anything else. Without a management key the
-account-credit stream falls back to the inference key and may report
-`authorization` while the current-key stream succeeds.
+configuration problem), `1` anything else.
+
+The streams need different credentials, so a single-credential deployment shows
+exactly one stream `not_configured` — which is the intended outcome, not a bug:
+
+| Credentials present | `openrouter-account` (`/api/v1/credits`) | `openrouter-key` (`/api/v1/key`) |
+| --- | --- | --- |
+| management/provisioning key only | collects the account balance | `not_configured` — the current-key stream needs its own key |
+| inference key only | falls back to the inference key, which the credit endpoint may refuse with `authorization` | collects the current key's usage |
+| both | collects the account balance | collects the current key's usage |
+
+Absent fields stay `null`: an account with no spend limit reports
+`limitUsd: null` and an unknown budget pace rather than a fabricated zero.
 
 ## Watch a quota window across a reset (task 5.1 evidence)
 
