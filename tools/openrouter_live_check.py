@@ -9,7 +9,9 @@ can succeed on the current-key stream while the account stream fails with
 
 Credentials are read from the environment only and are never printed:
 
-- ``OPENROUTER_MANAGEMENT_KEY`` is preferred for the credit balance;
+- ``OPENROUTER_MGMT_KEY`` or ``OPENROUTER_MANAGEMENT_KEY`` feeds the credit
+  balance (both names are accepted; the short one is what the local ``.env``
+  uses);
 - ``OPENROUTER_API_KEY`` feeds the current-key stream, and is used as the
   credit-balance fallback when no management key is set.
 
@@ -64,13 +66,23 @@ def _redact(value: Any, secret: str) -> Any:
     return value
 
 
+def _management_key_from_env() -> str:
+    """Read the credit-balance key, accepting both documented spellings."""
+    for name in ("OPENROUTER_MGMT_KEY", "OPENROUTER_MANAGEMENT_KEY"):
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
+
+
 def main() -> int:
-    management = os.environ.get("OPENROUTER_MANAGEMENT_KEY", "")
+    management = _management_key_from_env()
     inference = os.environ.get("OPENROUTER_API_KEY", "")
     if not management and not inference:
         print(
-            "SKIP: neither OPENROUTER_MANAGEMENT_KEY nor OPENROUTER_API_KEY is set.\n"
-            "Export one (for example `set -a; . ./.env; set +a`) and re-run."
+            "SKIP: none of OPENROUTER_MGMT_KEY, OPENROUTER_MANAGEMENT_KEY or\n"
+            "OPENROUTER_API_KEY is set. Export one (for example\n"
+            "`set -a; . ./.env; set +a`) and re-run."
         )
         return 2
 
