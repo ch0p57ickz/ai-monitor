@@ -662,6 +662,44 @@ rather than assumed:
   access to `zoey` in hand rather than only over the tailnet, in case the session
   drops before re-authentication completes.
 
+#### The one risk in the policy edit, and how to check it first
+
+Service access needs a `grants` entry. Whether adding one can change anything else
+depends on a detail the documentation gets wrong, so check it rather than assume it.
+
+The docs say the default allow-all policy applies "in the absence of an `acls`
+section". Tailscale's issue tracker says that is not the behaviour. The default
+policy is filled in only when the file is blanked *entirely*, not section by
+section, and what actually decides it is whether the file contains any allow rule at
+all: "the absence of any allow rules enables global default-allow"
+([tailscale#2799][issue-2799]). If a `grants` section counts as an allow rule, adding
+one to a file with no `acls` section turns the tailnet deny-by-default — which would
+cut every device-to-device connection, including `zoey`'s four routes.
+
+There is a safe way to learn which case this tailnet is in, without editing anything.
+In the admin console's JSON editor, the **Convert to grants** button is enabled only
+when the policy file contains an `acls` section.
+
+- **Button enabled** — the file has an explicit allow rule, so adding a grant leaves
+  every existing connection alone. Proceed.
+- **Button disabled** — the file has no `acls` section, which is the ambiguous case.
+  Write today's behaviour down explicitly in the same edit:
+
+  ```json
+  "acls": [ { "action": "accept", "src": ["*"], "dst": ["*:*"] } ]
+  ```
+
+  That is the default allow-all rule spelled out, so the result no longer depends on
+  how an absent section is interpreted, and tightening it later is a deliberate edit
+  instead of a side effect.
+
+Either way, read the diff the console shows before it saves, and use **Preview
+rules** to check how the rules apply to a given user or tag. This one file governs
+every device on the tailnet, and an edit that tightens access can cut that access the
+moment it saves.
+
+[issue-2799]: https://github.com/tailscale/tailscale/issues/2799
+
 The steps, in order:
 
 ```sh

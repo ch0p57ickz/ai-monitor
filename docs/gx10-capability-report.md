@@ -364,6 +364,25 @@ identity, so tagging the host does not strip them from the four existing routes;
 `autogroup:self` and user-based selectors stop matching a tagged `zoey`, and
 tagging re-registers the node. The runbook has the ordered steps.
 
+### Finding: adding a `grants` section can flip the tailnet to deny-by-default
+
+Service access needs a `grants` entry, and the documentation says adding one is
+harmless, because the default allow-all policy applies "in the absence of an `acls`
+section". Tailscale's issue tracker contradicts that: the default policy is filled in
+only when the file is blanked *entirely*, not section by section, and "the absence of
+any allow rules enables global default-allow" ([tailscale#2799][issue-2799]). Read
+that way, adding a `grants` section to a file with no `acls` section removes the only
+allow rule and cuts every device-to-device connection — `zoey`'s four Serve routes
+included.
+
+The console answers the question without an edit: **Convert to grants** is enabled
+only when the policy file contains an `acls` section. Enabled means an explicit allow
+rule exists and the grant is additive. Disabled means the ambiguous case, and the
+answer is to spell the allow-all rule out in the same edit, so the result stops
+depending on how an absent section is interpreted.
+
+[issue-2799]: https://github.com/tailscale/tailscale/issues/2799
+
 ## Verification results (local, 2026-10-19)
 
 Both tools run against this host's real providers; neither reads credentials.
