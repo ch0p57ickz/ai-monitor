@@ -9,6 +9,9 @@ child's lifecycle (start, reuse, teardown, restart) is part of the contract.
 from __future__ import annotations
 
 import json
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,18 @@ from ai_monitor.sources.codex import CodexAdapter
 from ai_monitor.sources.registry import CollectionError
 
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
+
+
+def _wrapper(tmp_path: Path) -> Path:
+    """A `codex_bin` that runs the fake with the *test's* interpreter.
+
+    Going through a wrapper keeps the tests independent of whichever `python3`
+    happens to be first on PATH.
+    """
+    path = tmp_path / "fake-codex"
+    path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n')
+    path.chmod(0o755)
+    return path
 
 KEYED = {
     "rateLimitsByLimitId": {
@@ -37,11 +52,11 @@ KEYED = {
 @pytest.fixture
 def fake(monkeypatch, tmp_path: Path):
     """Point `codex_bin` at the fake app-server and give it a scratch env."""
-    FAKE.chmod(0o755)
     monkeypatch.setenv("FAKE_MODE", "ok")
     monkeypatch.setenv("FAKE_MARKER", str(tmp_path / "starts.log"))
     monkeypatch.setenv("FAKE_PAYLOAD", str(tmp_path / "payload.json"))
     (tmp_path / "payload.json").write_text(json.dumps(KEYED))
+    _wrapper(tmp_path)
     return tmp_path
 
 
@@ -49,7 +64,7 @@ def _config(tmp_path: Path, **overrides) -> Config:
     defaults = dict(
         data_dir=str(tmp_path / "data"),
         codex_transport="stdio",
-        codex_bin=str(FAKE),
+        codex_bin=str(tmp_path / "fake-codex"),
         codex_timeout_seconds=10,
     )
     defaults.update(overrides)
@@ -170,6 +185,30 @@ class TestStdioTransport:
         adapter.close()
         adapter.close()
         assert session._proc is None
+
+    def test_close_aborts_a_child_that_is_mid_request(self, fake: Path, monkeypatch):
+        """Shutdown must not wait out the timeout of an in-flight read."""
+        monkeypatch.setenv("FAKE_MODE", "hang")
+        adapter = CodexAdapter()
+        config = _config(fake, codex_timeout_seconds=30)
+        errors: list = []
+
+        def run() -> None:
+            try:
+                adapter.fetch(config)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        time.sleep(1.0)  # let the request reach the blocked read
+        started = time.monotonic()
+        adapter.close()
+        elapsed = time.monotonic() - started
+        worker.join(timeout=10)
+
+        assert elapsed < 5, "close() must abort the child, not wait for the deadline"
+        assert errors and errors[0].category == "network"
 
     def test_socket_transport_never_spawns_a_child(self, fake: Path):
         """A socket deployment must not start the stdio child at all."""

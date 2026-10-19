@@ -435,7 +435,11 @@ def _pipe_chunk_reader(stream: Any) -> Callable[[float], bytes]:
     fd = stream.fileno()
 
     def read_chunk(timeout: float) -> bytes:
-        ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
+        if timeout <= 0:
+            # select() with a zero timeout polls readiness instead of failing,
+            # which would let a read slip past the deadline.
+            raise TimeoutError("codex app-server did not respond in time")
+        ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
             raise TimeoutError("codex app-server did not respond in time")
         return os.read(fd, 65536)
@@ -547,22 +551,41 @@ class _StdioSession:
                 raise
 
     def close(self) -> None:
-        with self._lock:
-            self._terminate()
+        """Abort and reap the child. Never blocks behind an in-flight read.
+
+        Deliberately does not take the session lock. ``UsageWorker.stop()``
+        calls this after joining attempts, but an attempt that already hit its
+        deadline can leave a helper thread blocked in a read; killing the child
+        closes the pipe, so that read fails promptly instead of holding shutdown
+        up for the whole timeout.
+        """
+        atexit.unregister(self.close)
+        proc, self._proc = self._proc, None
+        _reap(proc)
 
     def _terminate(self) -> None:
+        """Reap the child; called from a failed exchange with the lock held."""
         proc, self._proc = self._proc, None
-        if proc is None:
-            return
+        _reap(proc)
+
+
+def _reap(proc: Optional[subprocess.Popen]) -> None:
+    """Terminate a child and wait for it, so it cannot become a zombie."""
+    if proc is None:
+        return
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except OSError:
+        pass
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
         try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except OSError:
-            pass
-        try:
-            proc.terminate()
             proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        except OSError:  # pragma: no cover - defensive
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
             pass
+    except OSError:  # pragma: no cover - defensive
+        pass
