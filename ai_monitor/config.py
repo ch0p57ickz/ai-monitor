@@ -28,8 +28,9 @@ INTERVAL_BOUNDS = (1.0, 86400.0)
 #: (used by tests).
 PORT_BOUNDS = (0, 65535)
 
-#: Response size cap (bytes) shared by all endpoints.
-DEFAULT_RESPONSE_CAP_BYTES = 1_048_576
+#: Response size cap (bytes) shared by all endpoints. The widget contract
+#: specifies a 256 KiB cap.
+DEFAULT_RESPONSE_CAP_BYTES = 262_144
 
 #: History query bounds.
 DEFAULT_HISTORY_HOURS = 24
@@ -155,7 +156,7 @@ _BOUNDS: dict[str, tuple[float, float]] = {
     "history_max_hours": (1, 168),
     "history_default_limit": (1, 500),
     "history_max_limit": (1, 500),
-    "response_cap_bytes": (1024, 16 * 1024 * 1024),
+    "response_cap_bytes": (1024, 262_144),
     "scheduler_tick_seconds": (0.1, 3600.0),
     "codex_timeout_seconds": (1, 3600),
     "antigravity_timeout_seconds": (1, 3600),

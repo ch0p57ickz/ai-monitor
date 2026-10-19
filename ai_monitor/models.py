@@ -143,13 +143,27 @@ class Budget:
         }
 
     @staticmethod
-    def _usd_str(value: float | None) -> str | None:
+    def _usd_str(value: float | str | None) -> str | None:
+        """Format a USD amount as a minimal decimal string.
+
+        Tolerant of a value that is already a serialized decimal string: on
+        restart, ``_initial_seed`` rebuilds ``Budget`` objects from stored
+        rows whose USD fields are the strings this method produced, so the
+        serializer must be idempotent (``"7.5"`` -> ``"7.5"``) rather than
+        formatting the string as a float.
+        """
         if value is None:
             return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if not math.isfinite(number):
+            return None
         # Format as a minimal decimal string: 5.0 -> "5", 12.5 -> "12.5", 3.14159 -> "3.1416"
-        if value == int(value):
-            return str(int(value))
-        return f"{value:.4f}".rstrip("0").rstrip(".")
+        if number == int(number):
+            return str(int(number))
+        return f"{number:.4f}".rstrip("0").rstrip(".")
 
 
 # ---------------------------------------------------------------------------

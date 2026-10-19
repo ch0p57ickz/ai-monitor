@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import sys
+import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +19,7 @@ import pytest
 
 from ai_monitor.config import Config
 from ai_monitor.db import Database
-from ai_monitor.http import serve_http
+from ai_monitor.http import UsageServer, serve_http
 from ai_monitor.models import SourceStatus, get_source_def, normalize_observation
 from ai_monitor.sources.registry import (
     AntigravityAdapter,
@@ -161,7 +165,33 @@ class TestUsageWorker:
         assert entry["source"] == "codex"
         assert entry["status"] == "fresh"
         assert entry["collectedAt"]
-        assert "quota" in entry
+        # Spec shape: full observation fields, not the legacy "quota" key.
+        assert entry["provider"] == "codex"
+        assert entry["quotaWindows"]
+        assert entry["budgets"] == []
+        assert set(entry) >= {
+            "provider", "source", "accountId", "observedAt",
+            "collectedAt", "staleAfter", "status", "quotaWindows", "budgets",
+        }
+
+    def test_staleness_after_two_missed_intervals(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """Freshness is derived from the interval: stale after two missed ones."""
+        worker = UsageWorker(config=sample_config, db=sample_db)
+        codex = worker._workers["codex"]
+        assert codex._stale_after == 2.0 * sample_config.codex_interval
+
+        # A current observation is fresh.
+        _, fresh = make_obs("codex")
+        codex.last_observation = fresh
+        assert worker.usage_entry(CODEX)["status"] == "fresh"
+
+        # An observation older than two intervals is stale.
+        _, old = make_obs("codex")
+        old.collected_at = "2020-01-01T00:00:00Z"
+        codex.last_observation = old
+        assert worker.usage_entry(CODEX)["status"] == "stale"
 
     def test_poll_failure_retains_last_good(self, sample_config: Config, sample_db: Database):
         """On failure, the worker retains the last successful observation."""
@@ -564,3 +594,356 @@ class TestRegistry:
         with pytest.raises(CollectionError) as exc_info:
             adapter.fetch(sample_config)
         assert exc_info.value.category == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# HTTP API contract (spec: widget-usage-api)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _serve(sample_config: Config, sample_db: Database, registry=None, version="0.1.0-test"):
+    worker = UsageWorker(config=sample_config, db=sample_db, registry=registry, version=version)
+    srv = serve_http(sample_config, worker, version=version)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield srv, worker
+    finally:
+        srv.shutdown()
+
+
+def _get(url: str):
+    """Return (status, json_body, headers) for a GET, following no redirects."""
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return resp.status, json.loads(resp.read()), dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read()), dict(exc.headers)
+
+
+def _ok(raw: dict) -> partial:
+    """A registry entry: a fresh adapter that always returns ``raw``."""
+    return partial(FakeAdapter, raw=raw)
+
+
+def _success_window(window_id: str, used: float = 10.0) -> dict:
+    return {"status": "success", "quota_windows": [{"id": window_id, "used_percent": used}]}
+
+
+OBS_FIELDS = {
+    "provider", "source", "accountId", "observedAt",
+    "collectedAt", "staleAfter", "status", "quotaWindows", "budgets",
+}
+
+
+class TestHttpApiContract:
+    def test_usage_empty_before_first_success(self, sample_config: Config, sample_db: Database):
+        """GET /api/v1/usage returns observations: [] before any success."""
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, headers = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+        assert status == 200
+        assert data["schemaVersion"] == 1
+        assert "generatedAt" in data
+        assert data["observations"] == []
+        assert headers.get("Cache-Control") == "private, no-store"
+
+    def test_usage_shape_and_ordering(self, sample_config: Config, sample_db: Database):
+        """Observations use the full spec shape, ordered by source ID."""
+        registry = {
+            "codex": _ok(_success_window("codex-w")),
+            "antigravity": _ok(_success_window("agy-w")),
+        }
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            worker._poll_source(worker._workers["antigravity"])
+            status, data, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+        assert status == 200
+        assert [o["source"] for o in data["observations"]] == ["antigravity", "codex"]
+        entry = next(o for o in data["observations"] if o["source"] == "codex")
+        assert set(entry) >= OBS_FIELDS
+        assert entry["provider"] == "codex"
+        assert entry["status"] == "fresh"
+        # Spec: staleAfter is a timestamp string (collectedAt + 2 intervals).
+        assert isinstance(entry["staleAfter"], str)
+        assert entry["staleAfter"].endswith("Z")
+        assert entry["quotaWindows"][0]["id"] == "codex-w"
+        assert entry["budgets"] == []
+
+    def test_usage_omits_never_successful_source(self, sample_config: Config, sample_db: Database):
+        """A source that never succeeded has no usage entry but stays in /health."""
+        registry = {"codex": _ok(_success_window("codex-w"))}
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            _, usage, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+            _, health, _ = _get(f"http://127.0.0.1:{srv.port}/health")
+        assert [o["source"] for o in usage["observations"]] == ["codex"]
+        assert {s["id"] for s in health["sources"]} == {
+            "codex", "antigravity", "openrouter-account", "openrouter-key",
+        }
+        assert health["serviceStatus"] == "degraded"
+
+    def test_usage_retains_prior_success_during_failure(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """A failure retains the last good observation with its freshness state."""
+        registry = {"codex": _ok(_success_window("codex-w"))}
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            # Swap in a failing adapter and poll again.
+            worker._workers["codex"].adapter = FakeAdapter(
+                error=CollectionError("network", "network unreachable")
+            )
+            worker._poll_source(worker._workers["codex"])
+            _, usage, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+            _, health, _ = _get(f"http://127.0.0.1:{srv.port}/health")
+        assert [o["source"] for o in usage["observations"]] == ["codex"]
+        assert usage["observations"][0]["quotaWindows"][0]["id"] == "codex-w"
+        codex_health = next(s for s in health["sources"] if s["id"] == "codex")
+        assert codex_health["status"] in ("retrying", "operator_action", "unavailable")
+        assert codex_health["errorCategory"] == "network"
+
+    def test_usage_serving_does_not_poll(self, sample_config: Config, sample_db: Database):
+        """Serving /api/v1/usage must not trigger a provider poll."""
+        registry = {"codex": _ok(_success_window("codex-w"))}
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            before = worker._workers["codex"].adapter.fetch_count
+            _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+            after = worker._workers["codex"].adapter.fetch_count
+        assert after == before
+
+    def test_history_defaults_and_ascending_order(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """History defaults to hours=24, returns ascending collectedAt."""
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        base = datetime.now(UTC)
+        for i in range(3):
+            _, obs = make_obs("codex")
+            ts = base - timedelta(minutes=10 * (3 - i))
+            obs.collected_at = ts.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            obs.quota_windows[0].used_percent = float(i)
+            sample_db.insert_observation(source, obs)
+
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage/history")
+        assert status == 200
+        assert data["hours"] == 24
+        assert data["truncated"] is False
+        assert len(data["observations"]) == 3
+        ts = [o["collectedAt"] for o in data["observations"]]
+        assert ts == sorted(ts)
+        assert set(data["observations"][0]) >= OBS_FIELDS
+
+    def test_history_limit_and_truncated(self, sample_config: Config, sample_db: Database):
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        for _ in range(5):
+            _, obs = make_obs("codex")
+            sample_db.insert_observation(source, obs)
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(
+                f"http://127.0.0.1:{srv.port}/api/v1/usage/history?limit=2"
+            )
+        assert status == 200
+        assert len(data["observations"]) == 2
+        assert data["truncated"] is True
+
+    @pytest.mark.parametrize("qs", ["hours=999", "hours=0", "hours=abc", "limit=0", "limit=9999"])
+    def test_history_invalid_query(self, sample_config: Config, sample_db: Database, qs: str):
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(
+                f"http://127.0.0.1:{srv.port}/api/v1/usage/history?{qs}"
+            )
+        assert status == 400
+        assert data["schemaVersion"] == 1
+        assert data["error"]["category"] == "invalid_query"
+        assert "message" in data["error"]
+
+    def test_404_has_safe_error_body(self, sample_config: Config, sample_db: Database):
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(f"http://127.0.0.1:{srv.port}/nope")
+        assert status == 404
+        assert data["schemaVersion"] == 1
+        assert data["error"]["category"] == "not_found"
+
+    def test_method_not_allowed(self, sample_config: Config, sample_db: Database):
+        with _serve(sample_config, sample_db) as (srv, _):
+            url = f"http://127.0.0.1:{srv.port}/api/v1/usage"
+            req = urllib.request.Request(url, data=b"", method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    status, data = resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                status, data = exc.code, json.loads(exc.read())
+        assert status == 405
+        assert data["error"]["category"] == "method_not_allowed"
+
+    def test_response_too_large(self, sample_config: Config, sample_db: Database):
+        """A payload beyond the configured cap returns response_too_large."""
+        tiny = dataclasses.replace(sample_config, response_cap_bytes=1024)
+        big = {
+            "status": "success",
+            "quota_windows": [
+                {"id": f"w{i}", "label": "x" * 60, "used_percent": 1.0} for i in range(100)
+            ],
+        }
+        with _serve(tiny, sample_db, {"codex": _ok(big)}) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            status, data, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+        assert status == 413
+        assert data["error"]["category"] == "response_too_large"
+
+    def test_server_rejects_non_loopback_binding(self, sample_config: Config, sample_db: Database):
+        worker = UsageWorker(config=sample_config, db=sample_db, version="t")
+        with pytest.raises(ValueError):
+            UsageServer("0.0.0.0", 0, worker, "t", config=sample_config)
+
+    def test_budget_usd_round_trip_after_restart(
+        self, sample_config: Config, sample_db: Database
+    ):
+        """Seeded budgets survive a restart and serialize without raising.
+
+        Regression: ``_initial_seed`` rebuilds Budget objects from stored
+        decimal strings; the serializer used to format those strings as
+        floats and raise, dropping the whole /usage response.
+        """
+        source = get_source_def("openrouter-account")
+        sample_db.upsert_source(source)
+        raw = {
+            "status": "success",
+            "budgets": [
+                {
+                    "id": "b1",
+                    "scope": "account",
+                    "total_credits_usd": 10.0,
+                    "total_usage_usd": 2.5,
+                    "remaining_usd": 7.5,
+                    "limit_usd": 10.0,
+                    "used_usd": 2.5,
+                }
+            ],
+        }
+        sample_db.insert_observation(source, normalize_observation(source, raw))
+
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+        assert status == 200
+        entry = next(o for o in data["observations"] if o["source"] == "openrouter-account")
+        budget = entry["budgets"][0]
+        assert budget["remainingUsd"] == "7.5"
+        assert budget["totalCreditsUsd"] == "10"
+
+    def test_history_returns_newest_rows(self, sample_config: Config, sample_db: Database):
+        """Bounded history retains the most recent rows, returned ascending."""
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        base = datetime.now(UTC)
+        total = 10
+        for i in range(total):
+            _, obs = make_obs("codex")
+            ts = base - timedelta(minutes=total - i)
+            obs.collected_at = ts.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            obs.quota_windows[0].used_percent = float(i)
+            sample_db.insert_observation(source, obs)
+
+        with _serve(sample_config, sample_db) as (srv, _):
+            status, data, _ = _get(
+                f"http://127.0.0.1:{srv.port}/api/v1/usage/history?limit=3"
+            )
+        assert status == 200
+        assert data["truncated"] is True
+        used = [o["quotaWindows"][0]["usedPercent"] for o in data["observations"]]
+        assert used == [7.0, 8.0, 9.0]
+
+    def test_history_trims_to_byte_cap(self, sample_config: Config, sample_db: Database):
+        """History trims to the byte cap and sets truncated, never 413."""
+        tiny = dataclasses.replace(sample_config, response_cap_bytes=2048)
+        source = get_source_def("codex")
+        sample_db.upsert_source(source)
+        for i in range(20):
+            raw = {
+                "status": "success",
+                "quota_windows": [
+                    {"id": f"w{i}", "label": "x" * 100, "used_percent": 1.0}
+                ],
+            }
+            sample_db.insert_observation(source, normalize_observation(source, raw))
+
+        with _serve(tiny, sample_db) as (srv, _):
+            status, data, _ = _get(
+                f"http://127.0.0.1:{srv.port}/api/v1/usage/history?limit=500"
+            )
+        assert status == 200
+        assert data["truncated"] is True
+        assert 0 < len(data["observations"]) < 20
+        # The serialized payload must fit the configured cap.
+        assert len(json.dumps(data).encode("utf-8")) <= tiny.response_cap_bytes
+
+    def test_two_servers_are_isolated(self, sample_config: Config, sample_db: Database):
+        """Two live servers must not share worker/version/config state."""
+        with _serve(sample_config, sample_db, version="alpha") as (srv_a, _):
+            with _serve(sample_config, sample_db, version="beta") as (srv_b, _):
+                _, a, _ = _get(f"http://127.0.0.1:{srv_a.port}/api/v1/version")
+                _, b, _ = _get(f"http://127.0.0.1:{srv_b.port}/api/v1/version")
+        assert a["service_version"] == "alpha"
+        assert b["service_version"] == "beta"
+
+    def test_internal_error_returns_500(
+        self, sample_config: Config, sample_db: Database, monkeypatch
+    ):
+        """An unexpected failure returns a safe 500 JSON body, not a drop."""
+        with _serve(sample_config, sample_db) as (srv, worker):
+            monkeypatch.setattr(
+                worker, "usage_payload", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            )
+            status, data, headers = _get(f"http://127.0.0.1:{srv.port}/api/v1/usage")
+        assert status == 500
+        assert data["schemaVersion"] == 1
+        assert data["error"]["category"] == "internal"
+        assert "boom" not in data["error"]["message"]
+
+    def test_post_body_does_not_desync_keepalive(self, sample_config: Config, sample_db: Database):
+        """A 405 must drain the request body so the next request parses."""
+        import http.client
+
+        with _serve(sample_config, sample_db) as (srv, _):
+            conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
+            try:
+                conn.request(
+                    "POST",
+                    "/api/v1/usage",
+                    body=b'{"a": 1}',
+                    headers={"Content-Type": "application/json"},
+                )
+                r1 = conn.getresponse()
+                r1.read()
+                assert r1.status == 405
+                assert r1.getheader("Allow") == "GET"
+                conn.request("GET", "/health")
+                r2 = conn.getresponse()
+                body2 = r2.read()
+                assert r2.status == 200
+                assert r2.getheader("Content-Type") == "application/json"
+                json.loads(body2)
+            finally:
+                conn.close()
+
+    @pytest.mark.parametrize(
+        "category, expected",
+        [("unavailable", None), ("unknown", "internal"), ("network", "network")],
+    )
+    def test_health_error_category_uses_spec_enum(
+        self, sample_config: Config, sample_db: Database, category: str, expected
+    ):
+        registry = {
+            "codex": partial(
+                FakeAdapter, error=CollectionError(category, "boom")
+            )
+        }
+        with _serve(sample_config, sample_db, registry) as (srv, worker):
+            worker._poll_source(worker._workers["codex"])
+            _, health, _ = _get(f"http://127.0.0.1:{srv.port}/health")
+        codex = next(s for s in health["sources"] if s["id"] == "codex")
+        assert codex["errorCategory"] == expected

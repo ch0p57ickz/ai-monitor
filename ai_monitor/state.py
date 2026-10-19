@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from . import db as _db
@@ -32,18 +32,69 @@ log = logging.getLogger(__name__)
 
 MAX_RETRY_STREAK = 5
 
+#: Error categories permitted by the widget-usage-api spec for /health.
+_ALLOWED_ERROR_CATEGORIES = frozenset(
+    {
+        "authentication",
+        "authorization",
+        "rate_limited",
+        "timeout",
+        "network",
+        "invalid_response",
+        "unsupported",
+        "not_configured",
+        "internal",
+    }
+)
+
+
+def _normalize_error_category(category: Optional[str]) -> Optional[str]:
+    """Map an internal error category onto the spec enum.
+
+    Adapters use a few internal categories (``unavailable``, ``unknown``).
+    ``unavailable`` is carried by the source ``status`` field, so it maps to
+    ``null``; any other unrecognized value becomes ``internal`` so /health
+    never emits a value outside the contract.
+    """
+    if category is None:
+        return None
+    if category in ("unavailable", "not_available"):
+        return None
+    if category in _ALLOWED_ERROR_CATEGORIES:
+        return category
+    return "internal"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _age_seconds(collected_at: str, now_iso: str) -> float:
+    """Seconds between ``collected_at`` and ``now_iso``.
+
+    Returns infinity when either timestamp is unparseable, so a corrupt row
+    is reported as stale rather than silently as fresh.
+    """
     try:
         c = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
         n = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
         return max(0.0, (n - c).total_seconds())
     except (ValueError, AttributeError):
-        return 0.0
+        return float("inf")
+
+
+def _iso_plus_seconds(timestamp: str, seconds: float) -> Optional[str]:
+    """Return ``timestamp + seconds`` as a UTC ISO-8601 ``Z`` string."""
+    try:
+        base = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    result = base + timedelta(seconds=seconds)
+    return result.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 # Error categories that require operator action: the service must not keep
@@ -94,6 +145,8 @@ class UsageWorker:
         if worker.status == SourceStatus.SUCCESS:
             return "healthy"
         if worker.status == SourceStatus.UNAVAILABLE:
+            return "unavailable"
+        if worker.last_error_category in ("unavailable", "not_available"):
             return "unavailable"
         if worker.last_error_category in _OPERATOR_ACTION_CATEGORIES:
             return "operator_action"
@@ -406,7 +459,7 @@ class UsageWorker:
                     last_success: Optional[str] = None
                 else:
                     status = self._health_status(worker)
-                    error_category = worker.last_error_category
+                    error_category = _normalize_error_category(worker.last_error_category)
                     last_attempt = worker.last_attempt
                     last_success = worker.last_success
                 sources.append(
@@ -432,6 +485,12 @@ class UsageWorker:
         }
 
     def usage_payload(self) -> dict[str, Any]:
+        """Build the cached current-usage payload (spec: ``observations``).
+
+        Only sources with at least one successful collection appear, ordered
+        by source ID. Entries are the source's latest successful observation
+        in the shared observation shape.
+        """
         now_iso = _now_iso()
         with self._lock:
             observations = []
@@ -442,11 +501,43 @@ class UsageWorker:
                 entry = self._usage_entry_locked(worker, now_iso)
                 if entry is not None:
                     observations.append(entry)
+        observations.sort(key=lambda e: e["source"])
 
         return {
             "schemaVersion": 1,
             "generatedAt": now_iso,
             "observations": observations,
+        }
+
+    def _observation_entry(
+        self,
+        *,
+        provider: str,
+        source: str,
+        account_id: Optional[str],
+        observed_at: Optional[str],
+        collected_at: str,
+        quota_windows: list[dict[str, Any]],
+        budgets: list[dict[str, Any]],
+        stale_after: float,
+        now_iso: str,
+    ) -> dict[str, Any]:
+        """Assemble one observation in the shared API shape (line 41 of the spec).
+
+        ``staleAfter`` is serialized as a timestamp string (collection time
+        plus two configured intervals), matching the spec's timestamp rule.
+        """
+        age = _age_seconds(collected_at, now_iso)
+        return {
+            "provider": provider,
+            "source": source,
+            "accountId": account_id,
+            "observedAt": observed_at,
+            "collectedAt": collected_at,
+            "staleAfter": _iso_plus_seconds(collected_at, stale_after),
+            "status": "stale" if age > stale_after else "fresh",
+            "quotaWindows": quota_windows,
+            "budgets": budgets,
         }
 
     def _usage_entry_locked(self, worker: _SourceWorker, now_iso: str) -> Optional[dict[str, Any]]:
@@ -455,23 +546,17 @@ class UsageWorker:
         if obs is None or obs.status != SourceStatus.SUCCESS:
             return None
 
-        age = _age_seconds(obs.collected_at, now_iso)
-        stale = age > worker._stale_after
-
-        entry: dict[str, Any] = {
-            "source": worker.source.source,
-            "label": worker.source.label,
-            "status": "stale" if stale else "fresh",
-            "collectedAt": obs.collected_at,
-            "staleAfter": worker._stale_after,
-        }
-
-        if obs.quota_windows:
-            entry["quota"] = [w.to_dict() for w in obs.quota_windows]
-        if obs.budgets:
-            entry["budgets"] = [b.to_dict() for b in obs.budgets]
-
-        return entry
+        return self._observation_entry(
+            provider=obs.provider,
+            source=obs.source,
+            account_id=obs.account_id,
+            observed_at=obs.observed_at,
+            collected_at=obs.collected_at,
+            quota_windows=[w.to_dict() for w in obs.quota_windows],
+            budgets=[b.to_dict() for b in obs.budgets],
+            stale_after=worker._stale_after,
+            now_iso=now_iso,
+        )
 
     def usage_entry(self, source: SourceDef) -> Optional[dict[str, Any]]:
         """Return a single source's usage entry, or None if no successful observation."""
@@ -480,3 +565,72 @@ class UsageWorker:
             if worker is None:
                 return None
             return self._usage_entry_locked(worker, _now_iso())
+
+    def history_payload(
+        self, hours: int, limit: int, max_bytes: Optional[int] = None
+    ) -> dict[str, Any]:
+        """Build the bounded history payload (spec: ``/api/v1/usage/history``).
+
+        Rows are returned in ascending ``collectedAt`` order. ``truncated`` is
+        True when matching records were omitted by the count bound *or* the
+        byte bound. When ``max_bytes`` is given, the oldest observations are
+        dropped until the serialized payload fits, so the endpoint degrades
+        gracefully instead of returning ``response_too_large``.
+        """
+        now_iso = _now_iso()
+        try:
+            # Select the *most recent* rows, then present ascending (spec:
+            # bounded history returns the latest records in ascending order).
+            rows, truncated = self._db.history(
+                hours=hours, limit=limit, newest_first=True
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("history query failed")
+            raise
+        with self._lock:
+            observations = [
+                self._observation_entry(
+                    provider=row.get("provider") or self._provider_for(row.get("source") or ""),
+                    source=row.get("source") or "",
+                    account_id=row.get("accountId"),
+                    observed_at=row.get("observedAt"),
+                    collected_at=collected_at,
+                    quota_windows=row.get("quotaWindows") or [],
+                    budgets=row.get("budgets") or [],
+                    stale_after=self._stale_after_for(row.get("source") or ""),
+                    now_iso=now_iso,
+                )
+                for row in reversed(rows)
+                # Skip rows whose collectedAt cannot form a valid timestamp
+                # (corrupt data would otherwise violate the string contract).
+                if (collected_at := row.get("collectedAt"))
+                and _iso_plus_seconds(collected_at, 0) is not None
+            ]
+
+        payload: dict[str, Any] = {
+            "schemaVersion": 1,
+            "generatedAt": now_iso,
+            "hours": hours,
+            "truncated": truncated,
+            "observations": observations,
+        }
+        if max_bytes is not None:
+            # Drop the oldest observations (list is ascending) until it fits.
+            while observations and len(json.dumps(payload).encode("utf-8")) > max_bytes:
+                observations.pop(0)
+                payload["truncated"] = True
+        return payload
+
+    def _stale_after_for(self, source_id: str) -> float:
+        worker = self._workers.get(source_id)
+        if worker is not None:
+            return worker._stale_after
+        try:
+            return self._config.stale_after(source_id)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @staticmethod
+    def _provider_for(source_id: str) -> str:
+        source_def = get_source_def(source_id)
+        return source_def.provider if source_def is not None else "unknown"
