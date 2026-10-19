@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import statistics
 import tempfile
 import threading
@@ -29,7 +30,6 @@ import urllib.request
 from ai_monitor.config import Config
 from ai_monitor.db import Database
 from ai_monitor.http import serve_http
-from ai_monitor.sources.registry import default_registry
 from ai_monitor.state import UsageWorker
 
 
@@ -40,7 +40,13 @@ def _get(url: str) -> tuple[int, dict, float]:
             body = json.loads(response.read())
             return response.status, body, time.perf_counter() - started
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read()), time.perf_counter() - started
+        try:
+            body = json.loads(exc.read())
+        except json.JSONDecodeError:
+            body = {}
+        return exc.code, body, time.perf_counter() - started
+    except urllib.error.URLError as exc:
+        return 0, {"error": str(exc)}, time.perf_counter() - started
 
 
 def main() -> int:
@@ -73,7 +79,12 @@ def main() -> int:
     failures: list[str] = []
     codex_seen_healthy = False
     usage_counts: set[int] = set()
-    history_counts: list[int] = set()
+    history_truncated: set[bool] = set()
+    history_lengths: list[int] = []
+    observed_sources: set[str] = set()
+    # A source that has reported its own success at least once; observations may
+    # only ever come from these.
+    succeeded: set[str] = set()
     samples = 0
 
     print(f"soaking for {args.seconds:.0f}s on {base} ...")
@@ -99,12 +110,18 @@ def main() -> int:
                     statuses.setdefault(source["id"], set()).add(source["status"])
                     if source["id"] == "codex" and source["status"] == "healthy":
                         codex_seen_healthy = True
+                    if source["status"] == "healthy":
+                        succeeded.add(source["id"])
                 if health.get("serviceStatus") not in ("healthy", "degraded"):
                     failures.append(f"bad serviceStatus {health.get('serviceStatus')!r}")
             if usage_status == 200:
-                usage_counts.add(len(usage.get("observations", [])))
+                observations = usage.get("observations", [])
+                usage_counts.add(len(observations))
+                for observation in observations:
+                    observed_sources.add(observation["source"])
             if hist_status == 200:
-                history_counts.add(history.get("truncated"))
+                history_truncated.add(history.get("truncated"))
+                history_lengths.append(len(history.get("observations", [])))
                 if "hours" not in history:
                     failures.append("history response has no hours field")
 
@@ -115,6 +132,7 @@ def main() -> int:
         worker.stop()
         server.shutdown()
         db.close()
+        shutil.rmtree(workdir, ignore_errors=True)
 
     if not latencies:
         print("FAIL: no samples collected")
@@ -132,23 +150,44 @@ def main() -> int:
     )
     for source_id in sorted(statuses):
         print(f"  {source_id}: {', '.join(sorted(statuses[source_id]))}")
+    printed_source = ", ".join(sorted(observed_sources)) or "none"
     print(f"usage observation counts seen: {sorted(usage_counts)}")
-    print(f"history truncated values seen: {sorted(history_counts)}")
+    print(f"history truncated values seen: {sorted(history_truncated)}")
+    print(f"history lengths seen: {sorted(set(history_lengths))}")
+    print(f"sources ever observed: {printed_source}")
 
     # Expectations from the specs.
     if not codex_seen_healthy:
         failures.append("codex never reached healthy")
+    if "codex" not in observed_sources:
+        failures.append("codex never appeared in the usage payload")
     if ordered[-1] > 0.5:
-        failures.append(f"a response took {ordered[-1] * 1000:.0f} ms (polls must not block the API)")
-    if 1 not in usage_counts:
-        failures.append("never observed exactly one committed usage observation")
-    non_healthy = [
+        failures.append(
+            f"a response took {ordered[-1] * 1000:.0f} ms"
+            " (polls must not block the API)"
+        )
+    # First-failure omission: a source that only ever failed must never appear in
+    # the usage payload. Accumulated across every sample, so a source that fails
+    # early and succeeds later is not counted as failed-only.
+    failed_only = {
         source_id
         for source_id, seen in statuses.items()
-        if seen - {"healthy"}
-    ]
-    if not non_healthy:
-        failures.append("expected at least one failing source to coexist with codex")
+        if seen - {"healthy"} and "healthy" not in seen
+    }
+    leaked = observed_sources & failed_only
+    if leaked:
+        failures.append(
+            f"never-successful sources leaked into usage: {sorted(leaked)}"
+        )
+    # Independence: a source failing must not stop another from being collected.
+    if failed_only and not codex_seen_healthy:
+        failures.append("codex was not collected while other sources failed")
+    # Bounded history: the server must never return more rows than requested.
+    over = [length for length in history_lengths if length > 5]
+    if over:
+        failures.append(f"history returned more than the requested limit: {over}")
+    if any(not isinstance(value, bool) for value in history_truncated):
+        failures.append("history `truncated` is not a boolean")
 
     if failures:
         print()

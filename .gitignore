@@ -8,4 +8,10 @@ __pycache__/
 # Local secrets and environment overrides - never commit these.
 .env
 .env.*
+.envrc
+*.env
+*.env.*
+*.pem
+*.key
+# ...except the documented examples.
 !.env.example

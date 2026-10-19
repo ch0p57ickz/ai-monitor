@@ -19,6 +19,9 @@ Behaviour is selected with environment variables:
   the reader's line buffering.
 - `FAKE_MARKER`: append one line to this file on every start, so a test can
   count how many child processes were spawned.
+- `FAKE_HANG_MARKER`: append one line when a rate-limit read is left unanswered
+  (used with `FAKE_MODE=hang`), so a test can wait for the client to be blocked
+  in a read instead of sleeping.
 - `FAKE_PAYLOAD`: path to a JSON file holding the rate-limit result.
 """
 
@@ -82,6 +85,13 @@ def main():
             send({"method": "account/updated", "params": {"authMode": "chatgpt"}})
         elif method == "account/rateLimits/read":
             if mode == "hang":
+                # Record that the read request arrived and is about to be left
+                # unanswered, so a test can wait for the client to be blocked in
+                # its read instead of guessing with a sleep.
+                hang_marker = os.environ.get("FAKE_HANG_MARKER")
+                if hang_marker:
+                    with open(hang_marker, "a", encoding="utf-8") as handle:
+                        handle.write("read\n")
                 time.sleep(60)
                 continue
             encoded = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})

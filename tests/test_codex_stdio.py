@@ -190,13 +190,18 @@ class TestStdioTransport:
         adapter.fetch(_config(fake))
         session = adapter._session
         assert session is not None
+        proc = session._proc
+        assert proc is not None
         adapter.close()
         adapter.close()
         assert session._proc is None
+        assert proc.poll() is not None, "the child must actually be reaped"
 
     def test_close_aborts_a_child_that_is_mid_request(self, fake: Path, monkeypatch):
         """Shutdown must not wait out the timeout of an in-flight read."""
+        hang_marker = fake / "hang.log"
         monkeypatch.setenv("FAKE_MODE", "hang")
+        monkeypatch.setenv("FAKE_HANG_MARKER", str(hang_marker))
         adapter = CodexAdapter()
         config = _config(fake, codex_timeout_seconds=30)
         errors: list = []
@@ -209,7 +214,13 @@ class TestStdioTransport:
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
-        time.sleep(1.0)  # let the request reach the blocked read
+        # Wait until the child has received the read that it will never answer:
+        # the request is now blocked in its read, which is the state under test.
+        deadline = time.monotonic() + 10
+        while not hang_marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert hang_marker.exists(), "the fake never received the rate-limit read"
+
         started = time.monotonic()
         adapter.close()
         elapsed = time.monotonic() - started
@@ -233,12 +244,14 @@ class TestStdioTransport:
         adapter.fetch(_config(fake))
         session = adapter._session
         assert session is not None and session._proc is not None
+        proc = session._proc
 
         worker = UsageWorker(config=_config(fake), db=sample_db, version="t")
         worker._workers["codex"].adapter = adapter
         worker.stop()
 
         assert session._proc is None
+        assert proc.poll() is not None, "worker.stop() must reap the child"
 
 
 class TestStdioFraming:

@@ -501,10 +501,15 @@ class _StdioSession:
         self.command = list(command)
         self._proc: Optional[subprocess.Popen] = None
         self._initialized = False
+        self._closed = False
         self._lock = threading.Lock()
         atexit.register(self.close)
 
     def _ensure(self) -> "subprocess.Popen":
+        if self._closed:
+            # close() has run; the adapter has already dropped this session and
+            # will build a fresh one, so never start a child nobody will reap.
+            raise CollectionError("internal", "codex app-server session is closed")
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
         try:
@@ -544,7 +549,7 @@ class _StdioSession:
                 try:
                     stdin.write((json.dumps(message) + "\n").encode("utf-8"))
                     stdin.flush()
-                except (BrokenPipeError, ValueError) as exc:
+                except (BrokenPipeError, ValueError, OSError) as exc:
                     raise CollectionError(
                         "network", f"codex app-server closed the connection: {exc}"
                     )
@@ -554,11 +559,17 @@ class _StdioSession:
                     _initialize(reader, send)
                     self._initialized = True
                 return _read_rate_limits(reader, send)
-            except Exception:
+            except CollectionError:
                 # A failed exchange leaves the child in an unknown state.
-                self._initialized = False
                 self._terminate()
                 raise
+            except Exception as exc:  # noqa: BLE001
+                # The adapter contract is CollectionError; a racing close() can
+                # surface a raw OSError from the pipes.
+                self._terminate()
+                raise CollectionError(
+                    "network", f"codex app-server stdio failure: {exc}"
+                )
 
     def close(self) -> None:
         """Abort and reap the child. Never blocks behind an in-flight read.
@@ -570,13 +581,27 @@ class _StdioSession:
         up for the whole timeout.
         """
         atexit.unregister(self.close)
+        self._closed = True
         proc, self._proc = self._proc, None
         _reap(proc)
 
     def _terminate(self) -> None:
         """Reap the child; called from a failed exchange with the lock held."""
         proc, self._proc = self._proc, None
+        # The child is gone, so any future child is a new session.
+        self._initialized = False
         _reap(proc)
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    """Escalate to SIGKILL, tolerating a process that has already exited."""
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+        pass
+    except OSError:  # pragma: no cover - defensive
+        pass
 
 
 def _reap(proc: Optional[subprocess.Popen]) -> None:
@@ -592,10 +617,9 @@ def _reap(proc: Optional[subprocess.Popen]) -> None:
         proc.terminate()
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-            pass
+        _kill(proc)
     except OSError:  # pragma: no cover - defensive
-        pass
+        try:
+            proc.wait(timeout=1)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
