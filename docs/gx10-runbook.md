@@ -56,6 +56,28 @@ sources coexist independently. Results are recorded in
 python3 tools/codex_live_check.py
 ```
 
+## Watch a quota window across a reset (task 5.1 evidence)
+
+A reset is where the pace math is easiest to get wrong: the comparison target
+has to drop back to the *new* window's elapsed fraction rather than stay at the
+elapsed fraction of the window that just ended. Find the current reset time
+first (`/api/v1/usage` reports it as `resetsAt` on each window), then watch
+across it:
+
+```sh
+# Runs the real service with the real adapters, samples /api/v1/usage once a
+# minute, records every sample as JSON Lines, and checks what happened at the
+# reset. It must span at least one window reset to pass. Detach it if the watch
+# is longer than your session.
+python3 tools/reset_watch.py --minutes 50 --log /tmp/opencode/reset-watch.jsonl
+```
+
+It asserts that a reset was observed, that the window id and duration survive
+it, that the first post-reset pace is usable and compares against a *small*
+expectation (a stale window start would push it to 100), and that history stayed
+bounded and the API never returned a non-200. The JSON Lines log is the raw
+evidence; results are recorded in `docs/gx10-capability-report.md`.
+
 ## Install (task 5.2, first time)
 
 ```sh
