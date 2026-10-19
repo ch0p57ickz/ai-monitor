@@ -26,12 +26,21 @@ persistent data directory).
 | Item | Value |
 | --- | --- |
 | CLI | codex-cli 0.157.1 (`/usr/bin/codex`) |
-| App-server subcommand | `codex app-server` exists (experimental): `daemon`, `proxy`, `generate-ts`, `generate-json-schema` |
-| Control socket | `~/.codex/app-server-control/app-server-control.sock` — not present at check time; the daemon is not running and must be started (`codex app-server daemon start`) before rate-limit collection can be exercised |
+| App-server subcommand | `codex app-server` (experimental): `daemon`, `proxy`, `generate-ts`, `generate-json-schema`, `--listen stdio://`/`unix://`/`ws://` |
+| Control socket | `~/.codex/app-server-control/app-server-control.sock` exists while `codex app-server daemon` runs. On this host the managed daemon accepts then closes every connection, including `codex app-server proxy` (broken pipe); a directly started `codex app-server --listen stdio://` works. The daemon logs `Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces` |
 | Auth state | `~/.codex/auth.json` present (contents not read, not reported) |
-| Rate-limit fields | Not verified yet: the parser contract from the delta spec (`rateLimitsByLimitId` keyed view with primary/secondary windows; `rateLimits` single-view fallback) will be exercised by the adapter against the live app-server once it is running (task 3.1) |
+| Protocol | Confirmed from `codex app-server generate-json-schema` and a live session: the connection must send `initialize` first (any other request is answered with a closed connection), then `account/rateLimits/read` (`Account/rateLimits/readRequest`, response `GetAccountRateLimitsResponse`). Server notifications (`configWarning`, `account/updated`) arrive between replies and must be skipped |
+| Rate-limit fields | `rateLimitsByLimitId` (keyed) with a `rateLimits` single-view mirror; each snapshot has `primary`/`secondary` `RateLimitWindow` objects carrying `usedPercent` (integer), `windowDurationMins`, and `resetsAt` (Unix seconds). `accountId` is defined but was absent in the live payload |
 
-Verdict: capable, daemon start is a prerequisite.
+Live evidence (`tools/codex_live_check.py`, bridged stdio app-server, real
+account): `view: keyed`, two windows — `5h · primary` 4% used with
+`expectedUsedPercent` 66.93 → `under`, and `7d · secondary` 22% used with
+`expectedUsedPercent` 26.96 → `at`; `accountId` null.
+
+Verdict: capable. The adapter protocol is verified against the live app-server;
+on this host it must be reached through a working app-server transport because
+the managed daemon socket is unhealthy (the GX10 install step should confirm
+`codex app-server daemon start` produces a usable socket).
 
 ## Antigravity
 
@@ -127,7 +136,7 @@ Tailscale access rules remain pending (tasks 5.1-5.3).
 
 | Source | Enable now? | Notes |
 | --- | --- | --- |
-| `codex` | Yes (after daemon start) | Start `codex app-server daemon` on the service account; validate the keyed rate-limit view at first poll |
+| `codex` | Yes (after daemon start) | Start `codex app-server daemon` on the service account and confirm the socket answers (see the Codex section); the adapter protocol and pace math are verified live |
 | `antigravity` | No (session-only variant) | Adapter enabled but expected to report `unavailable`; no weekly quota to collect |
 | `openrouter-account` | No (no credential) | Awaiting a management/provisioning credential for `/api/v1/credits` (`openrouter_management_key`, falling back to `openrouter_api_key`); error category `not_configured` until set, `authorization` if a non-management key is used |
 | `openrouter-key` | No (no credential) | Awaiting credential for `/api/v1/key`; error category `not_configured` until set |

@@ -71,6 +71,13 @@ Give the service account its own provider sign-in before expecting data:
 sudo -u ai-monitor codex app-server daemon start
 sudo -u ai-monitor ls -l /home/ai-monitor/.codex/app-server-control/
 
+# Confirm the socket actually answers before relying on it. The daemon can
+# accept and then close every connection (for example when bubblewrap cannot
+# create user namespaces); `codex app-server proxy` reports a broken pipe in
+# that case. A direct `codex app-server --listen stdio://` still works and can
+# be used to verify the adapter:
+python3 tools/codex_live_check.py
+
 # Antigravity: the installed variant on this host has no usage subcommand, so
 # `antigravity` is expected to report `unavailable` (see the capability report).
 ```

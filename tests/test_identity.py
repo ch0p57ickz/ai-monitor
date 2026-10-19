@@ -83,7 +83,7 @@ class TestAccountIdentity:
 
 
 def _serve_once(sock_path: Path, result: dict):
-    """Serve one JSON-RPC response over a unix socket; return its thread."""
+    """Serve one app-server session (initialize, then rate limits)."""
     import socket
     import threading
 
@@ -91,11 +91,26 @@ def _serve_once(sock_path: Path, result: dict):
     server.bind(str(sock_path))
     server.listen(1)
 
+    def read_request(conn) -> bool:
+        data = b""
+        while b"\n" not in data:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return False
+            data += chunk
+        return True
+
     def run() -> None:
         try:
             conn, _ = server.accept()
             with conn:
-                conn.recv(4096)
+                if not read_request(conn):
+                    return
+                conn.sendall(
+                    (json.dumps({"jsonrpc": "2.0", "id": "init-1", "result": {}}) + "\n").encode()
+                )
+                if not read_request(conn):
+                    return
                 conn.sendall(
                     (json.dumps({"jsonrpc": "2.0", "id": "usage-1", "result": result}) + "\n").encode()
                 )
