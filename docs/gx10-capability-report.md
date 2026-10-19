@@ -412,6 +412,59 @@ narrower window moves it. Real providers report single digits, the spec document
 413 for an oversized body, and bounding the window count is a design decision
 rather than a bug fix, so this is recorded rather than changed.
 
+## Packaging verified without privileges (tasks 5.2 and 5.4)
+
+Three runbook procedures — install, upgrade, and rollback — run
+`pip install /opt/ai-monitor` in the service account's venv, and none had ever
+been executed. They can be, without sudo: build a venv in a temporary directory,
+install from a copy of the checkout, and run the console script the unit runs.
+
+| Step | Result |
+| --- | --- |
+| `pip install <checkout>` | Pass — builds a wheel and installs `ai-monitor` 0.1.0 |
+| `ai-monitor --version` | Pass — `ai-monitor 0.1.0` |
+| Service from the installed script | Pass — serves `/api/v1/version` and `/health`, shuts down cleanly on SIGTERM |
+| Upgrade (package as 0.2.0, reinstall) | Pass — all three version sources report 0.2.0 |
+| Rollback (back to 0.1.0, reinstall) | Pass — all three report 0.1.0 |
+
+What is *not* covered: systemd starting the unit, the unit's sandbox, and the
+service account's own provider sign-in. Those need the host.
+
+### Finding: the install needs network, or two extra flags
+
+`pip install <checkout>` uses build isolation, which installs `setuptools>=68`
+into a temporary build environment. A Python 3.12 venv has no setuptools of its
+own, so with no index the install fails:
+
+```
+pip subprocess to install build dependencies did not run successfully
+```
+
+A pre-warmed pip cache does not rescue it (verified). The working offline form is
+`python3 -m venv --system-site-packages` plus `pip install --no-build-isolation`,
+which builds with the system setuptools — 68.1.2 here, satisfying `>=68`. The
+runbook now uses that form and notes that a host with network access can use the
+plain commands.
+
+### Finding: the reported version had two sources, and they drifted
+
+`__version__` was hardcoded in `ai_monitor/__init__.py` while `pyproject.toml`
+carried the packaged version, and nothing compared them. Packaging 0.2.0 over
+0.1.0 showed the consequence:
+
+| Source | Reported |
+| --- | --- |
+| `pip show ai-monitor` | 0.2.0 |
+| `ai-monitor --version` | 0.1.0 |
+| `/api/v1/version` → `service_version` | 0.1.0 |
+
+An upgrade would therefore look like it had not taken effect, and the API would
+serve a stale `service_version`. `__version__` now reads the installed
+distribution metadata, falling back to a `SOURCE_VERSION` constant when running
+from a checkout, and a test pins that constant against `pyproject.toml` so the two
+cannot drift silently again. Re-verified end to end: install, upgrade, and
+rollback each report one consistent version across all three sources.
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |

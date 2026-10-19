@@ -158,8 +158,20 @@ sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbi
 # 2. Code and virtualenv, owned by the service account.
 sudo install -d -o ai-monitor -g ai-monitor /opt/ai-monitor
 sudo -u ai-monitor git clone <repo-url> /opt/ai-monitor
-sudo -u ai-monitor python3 -m venv /opt/ai-monitor/venv
-sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+# --system-site-packages and --no-build-isolation let the install work with no
+# network: a Python 3.12 venv has no setuptools of its own, so the default
+# isolated build tries to fetch setuptools from an index and fails offline
+# (verified: exit 1, "pip subprocess to install build dependencies did not run
+# successfully"). With these flags the build uses the system setuptools
+# (68.1.2 on this host, which satisfies the >=68 requirement). If the host has
+# network access, the plain `python3 -m venv` and `pip install` work as they are.
+sudo -u ai-monitor python3 -m venv --system-site-packages /opt/ai-monitor/venv
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-build-isolation /opt/ai-monitor
+
+# Confirm the console script is on PATH inside the venv before going further.
+# The unit runs this exact binary, and `ai-monitor --version` must print the
+# release you just installed.
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 
 # 3. Configuration with credentials, readable only by the service account.
 sudo install -d -m 0750 -o root -g ai-monitor /etc/ai-monitor
@@ -250,13 +262,26 @@ journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
 ```sh
 sudo -u ai-monitor git -C /opt/ai-monitor fetch --tags
 sudo -u ai-monitor git -C /opt/ai-monitor checkout <tag-or-sha>
-sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-build-isolation /opt/ai-monitor
 sudo systemctl restart ai-monitor
 systemctl status ai-monitor --no-pager
+
+# Confirm the running release is the one you checked out. `pip show`, `--version`,
+# and the API all read the installed distribution, so all three agree; verified by
+# packaging 0.2.0 over 0.1.0 and back.
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
+curl -s http://127.0.0.1:8732/api/v1/version
 ```
 
 Schema changes are applied on open; take a backup first (below). A failed
-upgrade is reverted by checking out the previous revision.
+upgrade is reverted by checking out the previous revision and repeating the
+`pip install` and restart.
+
+Rollback is the same three steps with the earlier revision, and the same version
+check confirms it took: check out the previous `<tag-or-sha>`, reinstall, restart,
+then compare `--version` and `/api/v1/version` against the release you intended.
+A rollback that leaves the service announcing the newer version means the install
+did not replace the package.
 
 ## Backup
 
