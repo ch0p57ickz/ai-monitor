@@ -405,7 +405,7 @@ class TestHandshake:
         """
         import socket as _socket
 
-        from ai_monitor.sources.codex import _ResponseReader
+        from ai_monitor.sources.codex import _ResponseReader, _socket_chunk_reader
 
         client, server = _socket.socketpair()
         stop = threading.Event()
@@ -423,7 +423,7 @@ class TestHandshake:
 
         thread = threading.Thread(target=flood, daemon=True)
         thread.start()
-        reader = _ResponseReader(client, time.monotonic() + 0.5)
+        reader = _ResponseReader(_socket_chunk_reader(client), time.monotonic() + 0.5)
         started = time.monotonic()
         try:
             with pytest.raises(CollectionError) as exc_info:

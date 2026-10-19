@@ -51,6 +51,13 @@ class SourceAdapter(ABC):
         """
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release any resources held across polls.
+
+        Adapters that own a long-lived resource (a child process, for example)
+        override this. The default does nothing, so it is always safe to call.
+        """
+
 
 # ---------------------------------------------------------------------------
 # Antigravity (agy CLI, version-sensitive, session-scoped)

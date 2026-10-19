@@ -54,6 +54,11 @@ DEFAULT_RETRY_JITTER = 0.2
 DEFAULT_DEADLINE = 30.0
 DEADLINE_BOUNDS = (1.0, 3600.0)
 
+#: How the Codex adapter reaches the app-server.
+CODEX_TRANSPORT_SOCKET = "socket"
+CODEX_TRANSPORT_STDIO = "stdio"
+_CODEX_TRANSPORTS = frozenset({CODEX_TRANSPORT_SOCKET, CODEX_TRANSPORT_STDIO})
+
 #: Default scheduler tick (seconds).
 DEFAULT_SCHEDULER_TICK = 1.0
 
@@ -91,6 +96,14 @@ class Config:
     openrouter_interval: float = DEFAULT_OPENROUTER_INTERVAL
 
     codex_app_server_socket: str = ""
+    # How the Codex adapter reaches the app-server: ``socket`` connects to an
+    # already-running app-server control socket (the daemon), ``stdio`` spawns
+    # `codex app-server --listen stdio://` as a child process and speaks the
+    # same protocol over its pipes. ``stdio`` needs no daemon, which matters on
+    # hosts where the daemon cannot start (for example when AppArmor blocks the
+    # bubblewrap sandbox's user namespace).
+    codex_transport: str = "socket"
+    codex_bin: str = "codex"
     codex_timeout_seconds: int = 10
 
     antigravity_bin: str = "agy"
@@ -213,6 +226,8 @@ def _coerce(key: str, value: Any) -> Any:
         "data_dir",
         "account_digest_key",
         "codex_app_server_socket",
+        "codex_transport",
+        "codex_bin",
         "antigravity_bin",
         "openrouter_api_key",
         "openrouter_management_key",
@@ -256,6 +271,18 @@ def _validate(cfg: Config) -> None:
             "account_digest_key must be at least 16 characters when set: the "
             "identities it digests are low entropy (account names, emails), so a "
             "short key could be brute-forced from a database dump",
+        )
+    if cfg.codex_transport not in _CODEX_TRANSPORTS:
+        raise ConfigError(
+            "invalid_value",
+            f"codex_transport must be one of {sorted(_CODEX_TRANSPORTS)}; "
+            f"got {cfg.codex_transport!r}",
+        )
+    if cfg.codex_transport == "stdio" and not cfg.codex_bin:
+        raise ConfigError(
+            "invalid_value",
+            "codex_bin must be a non-empty command path when codex_transport is "
+            "'stdio'",
         )
 
 

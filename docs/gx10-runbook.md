@@ -67,24 +67,32 @@ sudo systemctl enable --now ai-monitor
 Give the service account its own provider sign-in before expecting data:
 
 ```sh
-# Codex: start the app-server as the service account so the control socket exists.
+# Codex, option A (default): start the app-server as the service account so the
+# control socket exists, then confirm the socket actually answers.
 sudo -u ai-monitor codex app-server daemon start
 sudo -u ai-monitor ls -l /home/ai-monitor/.codex/app-server-control/
+# `codex app-server proxy` failing with a broken pipe means the daemon accepts
+# and then closes every connection. See the AppArmor note below.
 
-# Confirm the socket actually answers before relying on it. The daemon can
-# accept and then close every connection (for example when bubblewrap cannot
-# create user namespaces); `codex app-server proxy` reports a broken pipe in
-# that case. A direct `codex app-server --listen stdio://` still works and can
-# be used to verify the adapter:
+# Codex, option B: skip the daemon entirely. Set
+#   "codex_transport": "stdio"
+# and the service starts `codex app-server --listen stdio://` itself, speaking
+# the same protocol over the child's pipes. This needs no daemon and no host
+# policy change, and is the recommended setting when the daemon is unhealthy:
+# the rate-limit read runs no sandboxed tools, so the AppArmor restriction
+# below does not apply.
+
+# Verify either transport with the real adapter (spawns codex itself):
 python3 tools/codex_live_check.py
 
-# On Ubuntu 24.04 the usual cause is the AppArmor user-namespace restriction:
+# On Ubuntu 24.04 the usual cause of a dead daemon is the AppArmor
+# user-namespace restriction:
 #   sysctl kernel.apparmor_restrict_unprivileged_userns   -> 1
 #   bwrap --ro-bind / / --dev /dev true   -> "setting up uid map: Permission denied"
-# Fix it by granting the codex binary a user-namespace AppArmor profile, or, to
-# relax it system-wide (weakens host hardening):
+# If you need the daemon, grant the codex binary a user-namespace AppArmor
+# profile, or, to relax it system-wide (weakens host hardening):
 #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-# Then restart the daemon and re-check the socket before continuing.
+# Otherwise use "codex_transport": "stdio" and leave the hardening in place.
 
 # Antigravity: the installed variant on this host has no usage subcommand, so
 # `antigravity` is expected to report `unavailable` (see the capability report).

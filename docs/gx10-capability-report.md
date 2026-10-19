@@ -29,24 +29,23 @@ persistent data directory).
 | App-server subcommand | `codex app-server` (experimental): `daemon`, `proxy`, `generate-ts`, `generate-json-schema`, `--listen stdio://`/`unix://`/`ws://` |
 | Control socket | `~/.codex/app-server-control/app-server-control.sock` exists while `codex app-server daemon` runs, but on this host it accepts then closes every connection. The official `codex app-server proxy` fails identically (`failed to copy data from stdin to socket: Broken pipe`), so the daemon — not the client — is at fault. A directly started `codex app-server --listen stdio://` works |
 | Daemon root cause | `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu 24.04 default) blocks the user namespace that Codex's bubblewrap sandbox needs: `bwrap: setting up uid map: Permission denied`, and the daemon logs `Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces`. `kernel.unprivileged_userns_clone` is already `1`, so the AppArmor restriction is the blocker, not the userns sysctl |
-| Daemon fix (needs root) | Either grant the binary a user-namespace AppArmor profile (targeted), or relax the restriction system-wide with `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (weakens host hardening). Neither was applied here: both require privileged approval |
+| Daemon fix (needs root) | Either grant the binary a user-namespace AppArmor profile (targeted), or relax the restriction system-wide with `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (weakens host hardening). Neither is needed for the service: the stdio transport below avoids the daemon entirely |
+| Transports | `codex_transport` selects how the adapter reaches the interface. `socket` (default) uses the daemon control socket; `stdio` starts `codex app-server --listen stdio://` as a child and speaks the same protocol over its pipes. The stdio path runs no sandboxed tools, so the AppArmor user-namespace restriction does not apply to it. `codex_bin` names the executable (default `codex`) |
 | Auth state | `~/.codex/auth.json` present (contents not read, not reported) |
 | Protocol | Confirmed from `codex app-server generate-json-schema` and a live session: the connection must send `initialize` first (any other request is answered with a closed connection), then `account/rateLimits/read` (`Account/rateLimits/readRequest`, response `GetAccountRateLimitsResponse`). Server notifications (`configWarning`, `account/updated`) arrive between replies and must be skipped |
 | Rate-limit fields | `rateLimitsByLimitId` (keyed) with a `rateLimits` single-view mirror; each snapshot has `primary`/`secondary` `RateLimitWindow` objects carrying `usedPercent` (integer), `windowDurationMins`, and `resetsAt` (Unix seconds). `accountId` is defined but was absent in the live payload |
 
-Live evidence (`tools/codex_live_check.py`, bridged stdio app-server, real
-account, snapshot 2026-10-19): `view: keyed`, two windows — `5h · primary`
-at 14% used against `expectedUsedPercent` 69.45 → `under`, and `7d ·
-secondary` at 23% used against `expectedUsedPercent` 27.03 → `at`;
-`accountId` was null in the live payload. Percentages move with use; the
-classification and the presence of real reset bounds are the point.
+Live evidence (`tools/codex_live_check.py`, stdio transport, real account,
+snapshot 2026-10-19): `view: keyed`, two windows — `5h · primary` at 25% used
+against `expectedUsedPercent` 81.94 → `under`, and `7d · secondary` at 25%
+used against `expectedUsedPercent` 27.4 → `at`; `accountId` was null in the
+live payload. Percentages move with use; the classification and the presence
+of real reset bounds are the point.
 
-Verdict: capable. The adapter protocol is verified against the live app-server.
-Two prerequisites remain before the service can collect Codex usage on this
-host: the AppArmor user-namespace restriction must be lifted for the codex
-binary (root), and `codex app-server daemon start` must then be confirmed to
-produce a socket that answers. Until both hold, the service reports the Codex
-source as `network`/`unavailable`.
+Verdict: capable, and usable on this host with `codex_transport = "stdio"`,
+which needs no daemon and no host policy change. With the default `socket`
+transport the service reports the Codex source as `network`/`unavailable`
+until the AppArmor user-namespace restriction is lifted for the daemon.
 
 ## Antigravity
 
@@ -142,7 +141,7 @@ Tailscale access rules remain pending (tasks 5.1-5.3).
 
 | Source | Enable now? | Notes |
 | --- | --- | --- |
-| `codex` | Yes (after daemon start) | Start `codex app-server daemon` on the service account and confirm the socket answers (see the Codex section); the adapter protocol and pace math are verified live |
+| `codex` | Yes | Either `codex_transport = "stdio"` (no daemon needed; verified live) or a healthy app-server daemon socket. Protocol and pace math are verified live |
 | `antigravity` | No (session-only variant) | Adapter enabled but expected to report `unavailable`; no weekly quota to collect |
 | `openrouter-account` | No (no credential) | Awaiting a management/provisioning credential for `/api/v1/credits` (`openrouter_management_key`, falling back to `openrouter_api_key`); error category `not_configured` until set, `authorization` if a non-management key is used |
 | `openrouter-key` | No (no credential) | Awaiting credential for `/api/v1/key`; error category `not_configured` until set |

@@ -310,6 +310,13 @@ class UsageWorker:
             attempts = list(self._attempts.values())
         for attempt in attempts:
             attempt.join(timeout=join_timeout)
+        # No attempt is running now, so adapters can release long-lived
+        # resources (the Codex stdio child, for example) without racing a poll.
+        for worker in self._workers.values():
+            try:
+                worker.adapter.close()
+            except Exception:  # noqa: BLE001 - cleanup must never break stop()
+                log.exception("failed to close the %s adapter", worker.source.source)
 
     def _run(self) -> None:
         """Dispatcher loop: start each source's attempt when it is due.

@@ -27,7 +27,7 @@ The service SHALL retry transient failures with capped exponential backoff and j
 - **THEN** its state records an authentication or authorization error and does not enter a rapid retry loop
 
 ### Requirement: Codex rate limit collection
-The Codex adapter SHALL use the locally available app-server rate limit interface and preserve each reported limit ID and its primary and secondary windows as distinct quota windows. It SHALL use the single `rateLimits` view only when the keyed view is absent, and SHALL assign duration-based labels only when the reported duration supports them.
+The Codex adapter SHALL use the locally available app-server rate limit interface and preserve each reported limit ID and its primary and secondary windows as distinct quota windows. It SHALL use the single `rateLimits` view only when the keyed view is absent, and SHALL assign duration-based labels only when the reported duration supports them. The adapter SHALL support two transports to that interface: connecting to a running app-server control socket, and starting the app-server as a child process that speaks the same protocol over its pipes. The socket transport SHALL remain the default, and the adapter SHALL report `unavailable` or a network error category, without affecting other sources, when neither transport is usable.
 
 #### Scenario: Multiple Codex limits
 - **WHEN** `rateLimitsByLimitId` contains multiple limits with primary and secondary windows
@@ -36,6 +36,10 @@ The Codex adapter SHALL use the locally available app-server rate limit interfac
 #### Scenario: Keyed view unavailable
 - **WHEN** the Codex response lacks `rateLimitsByLimitId` but includes `rateLimits`
 - **THEN** the adapter collects the available single-view windows without inventing limit IDs
+
+#### Scenario: No usable app-server control socket
+- **WHEN** the configured transport starts the app-server as a child process and the control socket is absent or does not answer
+- **THEN** the adapter still collects through the child process, and the failure of one transport does not affect the other sources
 
 ### Requirement: Antigravity capability-aware collection
 The Antigravity adapter SHALL report only quota buckets and scopes supported by the installed local variant. It SHALL retain reported group, model, and session or weekly scope, and SHALL report `unavailable` when no compatible source is present.

@@ -1,9 +1,18 @@
-"""Codex app-server adapter: JSON-RPC over the app-server unix socket.
+"""Codex app-server adapter: JSON-RPC over the app-server interface.
 
-The adapter opens a session (connect, send ``initialize``, read its reply),
+Two transports reach the same interface:
+
+- ``socket`` (default) connects to an already-running app-server control socket
+  (the ``codex app-server daemon`` socket).
+- ``stdio`` spawns ``codex app-server --listen stdio://`` as a child process and
+  speaks the same protocol over its pipes. No daemon is involved, so this works
+  on hosts where the daemon cannot start — for example when AppArmor blocks the
+  user namespace its bubblewrap sandbox needs.
+
+Either way the adapter opens a session (send ``initialize``, read its reply),
 then sends ``account/rateLimits/read`` and converts the result into a
 normalized raw payload. Both messages are newline-delimited JSON-RPC on one
-connection; server notifications between replies are skipped.
+session; server notifications between replies are skipped.
 
 Parser contract (spec: provider-usage-collection)
 -------------------------------------------------
@@ -22,12 +31,16 @@ Parser contract (spec: provider-usage-collection)
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import select
 import socket
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .. import __version__
 from ..identity import account_identity, derive_account_id
@@ -215,19 +228,16 @@ def _label(limit_id: Optional[str], duration_minutes: Optional[float], kind: str
 class CodexAdapter(SourceAdapter):
     """Polls the local Codex app-server rate-limit interface."""
 
-    def fetch(self, config) -> dict[str, Any]:
-        socket_path = config.codex_app_server_socket
-        if not socket_path:
-            raise CollectionError(
-                "not_configured", "codex app-server socket not configured"
-            )
-        if not os.path.exists(socket_path):
-            raise CollectionError("unsupported", "codex app-server socket not present")
+    def __init__(self) -> None:
+        # The stdio child, reused across polls. Created lazily so a socket
+        # deployment never spawns anything.
+        self._session: Optional["_StdioSession"] = None
 
-        try:
-            result = _rpc_call(socket_path, config.codex_timeout_seconds)
-        except _HandshakeError as exc:
-            raise exc.error
+    def fetch(self, config) -> dict[str, Any]:
+        if getattr(config, "codex_transport", "socket") == "stdio":
+            result = self._fetch_stdio(config)
+        else:
+            result = self._fetch_socket(config)
 
         windows = parse_codex_rate_limits(result)
         # Mirror the parser's branch predicate exactly (non-empty keyed dict),
@@ -253,6 +263,50 @@ class CodexAdapter(SourceAdapter):
             payload["account_id"] = account_id
         return payload
 
+    def _fetch_socket(self, config) -> Any:
+        socket_path = config.codex_app_server_socket
+        if not socket_path:
+            raise CollectionError(
+                "not_configured", "codex app-server socket not configured"
+            )
+        if not os.path.exists(socket_path):
+            raise CollectionError("unsupported", "codex app-server socket not present")
+        try:
+            return _rpc_call(socket_path, config.codex_timeout_seconds)
+        except _HandshakeError as exc:
+            raise exc.error
+
+    def _fetch_stdio(self, config) -> Any:
+        """Collect through a `codex app-server --listen stdio://` child.
+
+        The child is started once and reused across polls; a failed exchange
+        tears it down so the next poll starts a fresh one. No daemon is
+        involved, which is what makes this transport work on hosts where the
+        app-server daemon cannot start.
+        """
+        if not getattr(config, "codex_bin", ""):
+            raise CollectionError(
+                "not_configured", "codex_bin is not configured for the stdio transport"
+            )
+        session = self._stdio_session(config)
+        return session.request(config.codex_timeout_seconds)
+
+    def _stdio_session(self, config) -> "_StdioSession":
+        command = [config.codex_bin, "app-server", "--listen", "stdio://"]
+        session = self._session
+        if session is None or session.command != command:
+            if session is not None:
+                session.close()
+            session = _StdioSession(command)
+            self._session = session
+        return session
+
+    def close(self) -> None:
+        """Release the child process, if any. Safe to call more than once."""
+        session, self._session = self._session, None
+        if session is not None:
+            session.close()
+
 
 class _HandshakeError(Exception):
     def __init__(self, error: CollectionError) -> None:
@@ -261,10 +315,15 @@ class _HandshakeError(Exception):
 
 
 class _ResponseReader:
-    """Reads newline-delimited JSON-RPC messages under one shared deadline."""
+    """Reads newline-delimited JSON-RPC messages under one shared deadline.
 
-    def __init__(self, sock: socket.socket, deadline: float) -> None:
-        self._sock = sock
+    ``read_chunk(timeout)`` returns the next bytes, ``b""`` at end of stream, or
+    raises ``TimeoutError``. Both transports (a socket and a child's pipe)
+    provide one, so the framing, deadline, and notification logic is shared.
+    """
+
+    def __init__(self, read_chunk: Callable[[float], bytes], deadline: float) -> None:
+        self._read_chunk = read_chunk
         self._deadline = deadline
         self._buffer = b""
 
@@ -304,10 +363,9 @@ class _ResponseReader:
                     raise CollectionError(
                         "timeout", "codex app-server did not respond in time"
                     )
-                self._sock.settimeout(remaining)
                 try:
-                    chunk = self._sock.recv(65536)
-                except socket.timeout:
+                    chunk = self._read_chunk(remaining)
+                except TimeoutError:
                     raise CollectionError(
                         "timeout", "codex app-server did not respond in time"
                     )
@@ -346,26 +404,59 @@ def _rpc_error(detail: Any) -> CollectionError:
     return CollectionError("internal", f"codex app-server rpc error: {text}")
 
 
-def _rpc_call(socket_path: str, timeout: float) -> Any:
-    """Open an app-server session and read the account rate limits.
+def _read_rate_limits(
+    reader: _ResponseReader, send: Callable[[dict[str, Any]], None]
+) -> Any:
+    """Run the two-request session over an already-open transport.
 
-    A new connection must send ``initialize`` first; the app-server closes the
-    socket for any other request. The rate-limit read then follows on the same
-    connection.
+    A fresh app-server session must send ``initialize`` first; anything else is
+    answered with a closed connection. The rate-limit read then follows on the
+    same session.
     """
+    send(INITIALIZE_REQUEST)
+    reader.read_response(INITIALIZE_REQUEST["id"])
+    send(RATE_LIMITS_REQUEST)
+    return reader.read_response(RATE_LIMITS_REQUEST["id"])
+
+
+def _socket_chunk_reader(sock: socket.socket) -> Callable[[float], bytes]:
+    """A ``read_chunk`` over a connected unix socket."""
+
+    def read_chunk(timeout: float) -> bytes:
+        sock.settimeout(timeout)
+        return sock.recv(65536)
+
+    return read_chunk
+
+
+def _pipe_chunk_reader(stream: Any) -> Callable[[float], bytes]:
+    """A ``read_chunk`` over a child process's stdout pipe."""
+
+    fd = stream.fileno()
+
+    def read_chunk(timeout: float) -> bytes:
+        ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
+        if not ready:
+            raise TimeoutError("codex app-server did not respond in time")
+        return os.read(fd, 65536)
+
+    return read_chunk
+
+
+def _rpc_call(socket_path: str, timeout: float) -> Any:
+    """Open a control-socket session and read the account rate limits."""
     sock: Optional[socket.socket] = None
     deadline = time.monotonic() + timeout
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect(socket_path)
-        reader = _ResponseReader(sock, deadline)
+        reader = _ResponseReader(_socket_chunk_reader(sock), deadline)
 
-        sock.sendall((json.dumps(INITIALIZE_REQUEST) + "\n").encode("utf-8"))
-        reader.read_response(INITIALIZE_REQUEST["id"])
+        def send(message: dict[str, Any]) -> None:
+            sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
 
-        sock.sendall((json.dumps(RATE_LIMITS_REQUEST) + "\n").encode("utf-8"))
-        return reader.read_response(RATE_LIMITS_REQUEST["id"])
+        return _read_rate_limits(reader, send)
     except FileNotFoundError:
         raise _HandshakeError(
             CollectionError("unsupported", "codex app-server socket not present")
@@ -388,3 +479,90 @@ def _rpc_call(socket_path: str, timeout: float) -> Any:
                 sock.close()
             except OSError:
                 pass
+
+
+class _StdioSession:
+    """A long-lived ``codex app-server --listen stdio://`` child process.
+
+    The child is started on first use and reused across polls. Any failed
+    exchange tears it down, so the next poll starts a fresh child rather than
+    talking to a wedged one. The service owns the child's lifetime; ``close()``
+    (and an ``atexit`` hook) reaps it.
+    """
+
+    def __init__(self, command: list[str]) -> None:
+        self.command = list(command)
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        atexit.register(self.close)
+
+    def _ensure(self) -> "subprocess.Popen":
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        try:
+            self._proc = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            raise CollectionError(
+                "unsupported", f"codex command not found: {self.command[0]!r}"
+            )
+        except OSError as exc:
+            raise CollectionError(
+                "network", f"could not start the codex app-server: {exc}"
+            )
+        return self._proc
+
+    def request(self, timeout: float) -> Any:
+        """Run one initialize + rate-limits session against the child."""
+        with self._lock:
+            proc = self._ensure()
+            stdin, stdout = proc.stdin, proc.stdout
+            if stdin is None or stdout is None:  # pragma: no cover - defensive
+                self._terminate()
+                raise CollectionError(
+                    "internal", "codex app-server stdio pipes are unavailable"
+                )
+            reader = _ResponseReader(
+                _pipe_chunk_reader(stdout), time.monotonic() + timeout
+            )
+
+            def send(message: dict[str, Any]) -> None:
+                try:
+                    stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+                    stdin.flush()
+                except (BrokenPipeError, ValueError) as exc:
+                    raise CollectionError(
+                        "network", f"codex app-server closed the connection: {exc}"
+                    )
+
+            try:
+                return _read_rate_limits(reader, send)
+            except Exception:
+                # A failed exchange leaves the child in an unknown state.
+                self._terminate()
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            self._terminate()
+
+    def _terminate(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except OSError:  # pragma: no cover - defensive
+            pass

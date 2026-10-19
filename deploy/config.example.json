@@ -12,6 +12,8 @@
 
   "codex_interval": 60.0,
   "codex_app_server_socket": "/home/ai-monitor/.codex/app-server-control/app-server-control.sock",
+  "codex_transport": "socket",
+  "codex_bin": "codex",
   "codex_timeout_seconds": 10,
 
   "antigravity_interval": 60.0,
