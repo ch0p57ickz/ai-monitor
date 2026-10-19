@@ -404,7 +404,17 @@ def parse_openrouter_key_usage(payload: Any) -> list[dict[str, Any]]:
             "remaining_usd": _finite_float(data.get("limit_remaining")),
             "limit_usd": _finite_float(data.get("limit")),
             "used_usd": _finite_float(data.get("usage")),
-            "resets_at": None,
+            # A reset timestamp enables exact budget pace; the period label
+            # alone does not (usage-snapshots spec: a monthly label without a
+            # timestamp must not become an exact boundary).
+            "resets_at": _as_str(
+                _first_present(
+                    data, ("limit_reset_at", "limitResetAt", "resets_at", "reset_at")
+                )
+            ),
+            "reset_period": _as_str(
+                _first_present(data, ("limit_reset", "limitReset"))
+            ),
         }
     ]
 

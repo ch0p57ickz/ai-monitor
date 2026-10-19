@@ -366,8 +366,16 @@ class UsageWorker:
             history = self._window_history(
                 worker.source.source, account_id=raw.get("account_id")
             )
+            budget_history = self._budget_history(
+                worker.source.source, account_id=raw.get("account_id")
+            )
             raw = enrich_observation(
-                worker.source, raw, self._pace_settings, history, now_iso=now
+                worker.source,
+                raw,
+                self._pace_settings,
+                history,
+                now_iso=now,
+                budget_history=budget_history,
             )
             obs = normalize_observation(worker.source, raw)
             obs.collected_at = now
@@ -433,6 +441,51 @@ class UsageWorker:
                     continue
                 history.setdefault(wid, []).append(
                     {"collected_at": row.get("collectedAt"), "used_percent": used}
+                )
+        return history
+
+    def _budget_history(
+        self,
+        source_key: str,
+        account_id: Optional[str] = None,
+        limit: int = 24,
+        hours: float = 48.0,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Build the per-budget history for budget pace calculation.
+
+        Maps a budget ``id`` to its list of prior rows, each carrying
+        ``collected_at``, ``used_usd``, and ``limit_usd``.
+
+        Returns an empty mapping when the observation has no ``account_id``.
+        The spec forbids combining inferred spending across an account change,
+        and without an account identifier a spend series cannot be attributed
+        to one account, so no cross-snapshot spend evidence is used — the
+        budget still reports its known balance from the current poll.
+        """
+        if account_id is None:
+            return {}
+        try:
+            rows, _ = self._db.history(
+                source=source_key,
+                account_id=account_id,
+                hours=hours,
+                limit=limit,
+                newest_first=True,
+            )
+        except Exception:  # noqa: BLE001
+            return {}
+        history: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            for b in row.get("budgets") or []:
+                bid = b.get("id")
+                if not bid:
+                    continue
+                history.setdefault(bid, []).append(
+                    {
+                        "collected_at": row.get("collectedAt"),
+                        "used_usd": b.get("usedUsd"),
+                        "limit_usd": b.get("limitUsd"),
+                    }
                 )
         return history
 

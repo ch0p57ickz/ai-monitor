@@ -28,6 +28,7 @@ it means the same thing whether the basis is ``reported`` or ``estimated``.
 
 from __future__ import annotations
 
+import calendar
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,7 @@ __all__ = [
     "PaceSettings",
     "unknown_pace",
     "compute_pace",
+    "compute_budget_pace",
     "enrich_observation",
 ]
 
@@ -328,6 +330,170 @@ def _window_bounds(
 
 
 # ---------------------------------------------------------------------------
+# budget pace (OpenRouter key limits)
+# ---------------------------------------------------------------------------
+
+# Nominal reset periods a budget may report. A calendar month is handled
+# separately because its length varies.
+_BUDGET_PERIODS = {
+    "daily": timedelta(days=1),
+    "day": timedelta(days=1),
+    "weekly": timedelta(days=7),
+    "week": timedelta(days=7),
+}
+_BUDGET_MONTHLY = frozenset({"monthly", "month"})
+
+
+def _shift_months(value: datetime, months: int) -> datetime:
+    """Shift a datetime by whole calendar months, clamping the day."""
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+def _budget_period_start(reset_at: datetime, period: Any) -> Optional[datetime]:
+    """Return the start of the reset period ending at ``reset_at``.
+
+    The start is only derived from a recognised period label. ``None`` means
+    the boundary is not exact, which keeps the budget pace ``unknown`` rather
+    than inferring a window (usage-snapshots spec: a label without an exact
+    boundary must not become an exact pace).
+    """
+    if period is None:
+        return None
+    key = str(period).strip().lower()
+    if key in _BUDGET_MONTHLY:
+        return _shift_months(reset_at, -1)
+    delta = _BUDGET_PERIODS.get(key)
+    if delta is None:
+        return None
+    return reset_at - delta
+
+
+def _spend_points(
+    budget: dict[str, Any],
+    now: datetime,
+    history: list[dict[str, Any]],
+) -> list[tuple[datetime, float]]:
+    """Build the ascending (time, used_usd) spend series for this budget.
+
+    Rows whose reported limit differs from the current limit are skipped: a
+    changed limit makes cumulative spend incomparable, so the series would
+    otherwise mix plan changes.
+    """
+    points: list[tuple[datetime, float]] = []
+    limit = _as_float(_get(budget, "limitUsd", "limit_usd"))
+    used = _as_float(_get(budget, "usedUsd", "used_usd"))
+    if used is not None:
+        points.append((now, used))
+    for row in history:
+        prior = _as_float(_get(row, "used_usd", "usedUsd"))
+        row_limit = _as_float(_get(row, "limit_usd", "limitUsd"))
+        ts = _parse_iso(_get(row, "collected_at", "collectedAt"))
+        if prior is None or ts is None:
+            continue
+        # The persisted limit is rounded to a decimal string, so compare
+        # tolerantly rather than by exact float equality. The tolerance is far
+        # smaller than any real plan change (e.g. 50 -> 200).
+        if (
+            limit is not None
+            and row_limit is not None
+            and not math.isclose(row_limit, limit, rel_tol=1e-4)
+        ):
+            continue
+        points.append((ts, prior))
+    points.sort(key=lambda point: point[0])
+    return points
+
+
+def _spend_evidence(
+    budget: dict[str, Any],
+    now: datetime,
+    settings: PaceSettings,
+    history: list[dict[str, Any]],
+) -> bool:
+    """Whether a same-account series shows real, recent positive spend.
+
+    Mirrors the window evidence gate: the series must be consecutive (no gap
+    above ``max_gap_seconds``), end close to ``now`` (so a stale series is not
+    treated as live evidence), span at least ``min_span_seconds``, and show
+    net positive spend. ``history`` is already account-scoped by the caller.
+    """
+    points = _spend_points(budget, now, history)
+    if len(points) < 2:
+        return False
+    for (t0, _), (t1, _) in zip(points, points[1:]):
+        if (t1 - t0).total_seconds() > settings.max_gap_seconds:
+            return False
+    if (now - points[-1][0]).total_seconds() > settings.max_gap_seconds:
+        # The most recent observation is stale, so it is not live evidence.
+        return False
+    span = (points[-1][0] - points[0][0]).total_seconds()
+    if span < settings.min_span_seconds:
+        return False
+    return (points[-1][1] - points[0][1]) > 0
+
+
+def compute_budget_pace(
+    budget: dict[str, Any],
+    settings: Optional[PaceSettings] = None,
+    now_iso: str | None = None,
+    history: Optional[Iterable[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Compute the pace object for a budget record.
+
+    Exact budget pace requires a key limit, a used amount, and exact reset
+    boundaries (an exact ``resets_at`` plus a recognised reset period). When
+    those are known, the expectation is the elapsed fraction of the period and
+    the actual value is ``used / limit`` as a percentage.
+
+    Without exact boundaries the classification stays ``unknown`` and
+    ``expectedUsedPercent`` is ``null``. Known balances remain in the budget
+    fields, and locally observed spend (a consecutive same-account series) is
+    signalled by ``basis == "reported"``. No projection is emitted, so there
+    is nothing to mislabel as an exact pace.
+    """
+    settings = settings or PaceSettings()
+    now = _parse_iso(now_iso) or datetime.now(timezone.utc)
+
+    reported = bool(history) and _spend_evidence(
+        budget, now, settings, list(history)
+    )
+    fallback = {
+        "classification": "unknown",
+        "basis": "reported" if reported else "none",
+        "expectedUsedPercent": None,
+    }
+
+    limit = _as_float(_get(budget, "limitUsd", "limit_usd"))
+    used = _as_float(_get(budget, "usedUsd", "used_usd"))
+    if limit is None or limit <= 0 or used is None:
+        return fallback
+
+    reset_at = _parse_iso(_get(budget, "resetsAt", "resets_at"))
+    if reset_at is None:
+        return fallback
+
+    period = _get(budget, "resetPeriod", "reset_period", "limitReset", "limit_reset")
+    start = _budget_period_start(reset_at, period)
+    if start is None or start > now or reset_at <= now:
+        return fallback
+
+    total = (reset_at - start).total_seconds()
+    elapsed = _clamp01((now - start).total_seconds() / total)
+    expected = _clamp_percent(elapsed * 100.0)
+    actual = _clamp_percent(used / limit * 100.0)
+
+    return {
+        "classification": _classify(expected, actual, settings.tolerance_percent),
+        "basis": "reported" if reported else "estimated",
+        "expectedUsedPercent": round(expected, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Convenience for the worker: enrich a full observation's raw payload
 # ---------------------------------------------------------------------------
 
@@ -338,10 +504,12 @@ def enrich_observation(
     settings: Optional[PaceSettings] = None,
     history: Optional[dict[str, list[dict[str, Any]]]] = None,
     now_iso: Optional[str] = None,
+    budget_history: Optional[dict[str, list[dict[str, Any]]]] = None,
 ) -> dict[str, Any]:
-    """Return a new raw payload with ``pace`` filled in for every window.
+    """Return a new raw payload with ``pace`` filled in for every window/budget.
 
     ``history`` maps a window ``id`` to its list of prior normalized rows.
+    ``budget_history`` does the same for budget ``id`` (same-account only).
     Windows with no prior rows still get an estimated pace when the window
     has a plausible reset and duration. ``now_iso`` anchors the pace math to
     a fixed clock (used by tests); it defaults to the current time.
@@ -357,4 +525,18 @@ def enrich_observation(
         )
         windows[i] = w
     out["quota_windows"] = windows
+
+    budgets = list(raw.get("budgets") or [])
+    budget_history = budget_history or {}
+    for i, b in enumerate(budgets):
+        b = dict(b)
+        bid = b.get("id", "")
+        b["pace"] = compute_budget_pace(
+            b,
+            settings=settings,
+            history=budget_history.get(bid, []),
+            now_iso=now_iso,
+        )
+        budgets[i] = b
+    out["budgets"] = budgets
     return out

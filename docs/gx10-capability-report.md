@@ -63,6 +63,13 @@ completeness only. No OpenRouter credential is configured on this host yet:
 `envget -s` (name-only listing) shows no OpenRouter credential variable, and the
 process environment contains no OpenRouter key.
 
+Account identity: neither OpenRouter endpoint exposes an identity that is safe to
+store (the key payload's `label` may be a name or email), so `accountId` stays
+`null`. Per the design, a null identity means account-dependent trends are
+avoided: cross-snapshot spend deltas are not combined, so budget pace `basis`
+stays `none`/`estimated` and never `reported`. The delta path is exercised by
+tests with a synthetic account id.
+
 | Endpoint | Purpose | Unauthenticated result | Error category |
 | --- | --- | --- | --- |
 | `GET https://openrouter.ai/api/v1/key` | current-key usage/limits | HTTP 401, JSON `{"error":{"message":"No cookie auth credentials found","code":401}}` | `authentication` |

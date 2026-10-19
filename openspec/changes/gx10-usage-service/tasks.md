@@ -9,7 +9,7 @@
 - [x] 2.2 Implement SQLite schema, WAL setup, short writes, latest-observation reads per source, and bounded retention; verify a restart preserves successful observations and pruning keeps each source's latest result.
 - [x] 2.3 Implement source state and freshness from last attempt, last success, and configured intervals; verify failed polls retain the last good reading, stale begins after two missed intervals, and a never-successful source has no usage observation but has health state.
 - [x] 2.4 Implement quota pace with reported or estimated window starts, plausibility checks, and configurable tolerance; verify synthetic cases for under, at, over, estimated, and unknown pace.
-- [ ] 2.5 Implement same-account OpenRouter spend deltas and exact-boundary budget pace; verify account changes and `limit_reset: "monthly"` without a timestamp do not produce an exact pace.
+- [x] 2.5 Implement same-account OpenRouter spend deltas and exact-boundary budget pace; verify account changes and `limit_reset: "monthly"` without a timestamp do not produce an exact pace.
 
 ## 3. Provider adapters and scheduling
 
