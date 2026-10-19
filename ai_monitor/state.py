@@ -22,6 +22,7 @@ from .models import (
     get_source_def,
     normalize_observation,
 )
+from .pace import PaceSettings, enrich_observation
 from .sources.registry import CollectionError, SourceAdapter, default_registry
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -43,6 +44,12 @@ def _age_seconds(collected_at: str, now_iso: str) -> float:
         return max(0.0, (n - c).total_seconds())
     except (ValueError, AttributeError):
         return 0.0
+
+
+# Error categories that require operator action: the service must not keep
+# retrying aggressively; an operator needs to fix the credential or
+# configuration first.
+_OPERATOR_ACTION_CATEGORIES = frozenset({"authentication", "authorization", "not_configured"})
 
 
 @dataclass
@@ -72,6 +79,26 @@ class _SourceWorker:
 class UsageWorker:
     """Single scheduler thread that owns per-source cadence and JSON payloads."""
 
+    @staticmethod
+    def _health_status(worker: "_SourceWorker") -> str:
+        """Map worker state to the health status vocabulary.
+
+        ``healthy`` — last poll succeeded.
+        ``retrying`` — last poll failed transiently (timeout, network,
+        rate_limited, invalid_response, internal, unknown); the scheduler
+        keeps retrying with capped backoff.
+        ``operator_action`` — the failure category indicates a credential
+        or configuration problem that retrying cannot fix.
+        ``unavailable`` — the source is known to be absent on this host.
+        """
+        if worker.status == SourceStatus.SUCCESS:
+            return "healthy"
+        if worker.status == SourceStatus.UNAVAILABLE:
+            return "unavailable"
+        if worker.last_error_category in _OPERATOR_ACTION_CATEGORIES:
+            return "operator_action"
+        return "retrying"
+
     def __init__(
         self,
         *,
@@ -84,6 +111,7 @@ class UsageWorker:
         self._db = db
         self._version = version
         self._registry = registry or default_registry()
+        self._pace_settings = PaceSettings()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -260,6 +288,13 @@ class UsageWorker:
 
         # Normalize
         if raw is not None:
+            # Enrich quota windows with pace using prior same-window
+            # observations (reported spend-rate) or the window's own
+            # reset/duration (estimated elapsed fraction). The current
+            # row has not been committed yet, so the history is prior
+            # rows only.
+            history = self._window_history(worker.source.source)
+            raw = enrich_observation(worker.source, raw, self._pace_settings, history)
             obs = normalize_observation(worker.source, raw)
             obs.collected_at = now
         else:
@@ -276,41 +311,78 @@ class UsageWorker:
             worker._consecutive_failures = 0
 
     # ------------------------------------------------------------------
+    # Pace history
+    # ------------------------------------------------------------------
+
+    def _window_history(
+        self,
+        source_key: str,
+        limit: int = 24,
+        hours: float = 48.0,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Build the per-window history for pace calculation.
+
+        Maps a quota-window ``id`` to its list of prior normalized rows
+        (newest first), each carrying ``collected_at`` and ``used_percent``.
+        Rows are restricted to this source's last few successful snapshots
+        so the reported spend-rate stays on recent, consecutive data.
+        """
+        try:
+            rows, _ = self._db.history(source=source_key, hours=hours, limit=limit)
+        except Exception:  # noqa: BLE001
+            return {}
+        history: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            for w in row.get("quota_windows") or []:
+                wid = w.get("id")
+                used = w.get("used_percent")
+                if not wid or used is None:
+                    continue
+                history.setdefault(wid, []).append(
+                    {"collected_at": row.get("collected_at"), "used_percent": used}
+                )
+        return history
+
+    # ------------------------------------------------------------------
     # Payloads
     # ------------------------------------------------------------------
 
     def health_payload(self) -> dict[str, Any]:
+        """Build the /health payload.
+
+        Source states use the spec vocabulary: ``healthy``, ``retrying``,
+        ``operator_action``, or ``unavailable``. ``serviceStatus`` is
+        ``healthy`` only when every source is healthy.
+        """
         now_iso = _now_iso()
         with self._lock:
             sources = []
             for source in SOURCE_DEFS:
                 worker = self._workers.get(source.source)
                 if worker is None:
-                    sources.append(
-                        {
-                            "source": source.source,
-                            "label": source.label,
-                            "status": "unknown",
-                            "lastAttempt": None,
-                            "lastSuccess": None,
-                            "errorCategory": None,
-                        }
-                    )
-                    continue
-                status_str = worker.status.value
+                    status = "unavailable"
+                    error_category: Optional[str] = None
+                    last_attempt: Optional[str] = None
+                    last_success: Optional[str] = None
+                else:
+                    status = self._health_status(worker)
+                    error_category = worker.last_error_category
+                    last_attempt = worker.last_attempt
+                    last_success = worker.last_success
                 sources.append(
                     {
-                        "source": source.source,
-                        "label": source.label,
-                        "status": status_str,
-                        "lastAttempt": worker.last_attempt,
-                        "lastSuccess": worker.last_success,
-                        "errorCategory": worker.last_error_category,
+                        "id": source.source,
+                        "provider": source.provider,
+                        "status": status,
+                        "lastAttemptAt": last_attempt,
+                        "lastSuccessAt": last_success,
+                        "errorCategory": error_category,
                     }
                 )
 
-            all_success = all(s["status"] == "success" for s in sources) if sources else False
-            service_status = "healthy" if all_success else "degraded"
+            service_status = (
+                "healthy" if all(s["status"] == "healthy" for s in sources) else "degraded"
+            )
 
         return {
             "schemaVersion": 1,

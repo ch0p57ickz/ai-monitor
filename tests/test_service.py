@@ -6,6 +6,7 @@ import json
 import sys
 import time
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,8 @@ from ai_monitor.sources.registry import (
     build_registry,
     default_registry,
 )
-from ai_monitor.state import UsageWorker
+from ai_monitor.state import UsageWorker, _SourceWorker
+from conftest import FakeSourceAdapter
 
 CODEX = get_source_def("codex")
 ANTIGRAVITY = get_source_def("antigravity")
@@ -78,15 +80,61 @@ class TestUsageWorker:
         payload = worker.health_payload()
         assert payload["schemaVersion"] == 1
         assert "generatedAt" in payload
-        assert payload["serviceStatus"] in ("healthy", "degraded")
+        # No data collected yet -> every source is retrying -> degraded.
+        assert payload["serviceStatus"] == "degraded"
         assert isinstance(payload["sources"], list)
         assert len(payload["sources"]) == 4
 
-        source_names = [s["source"] for s in payload["sources"]]
-        assert "codex" in source_names
-        assert "antigravity" in source_names
-        assert "openrouter-account" in source_names
-        assert "openrouter-key" in source_names
+        assert [s["id"] for s in payload["sources"]] == [
+            "codex",
+            "antigravity",
+            "openrouter-account",
+            "openrouter-key",
+        ]
+        for s in payload["sources"]:
+            assert s["provider"] is not None
+            # Initial state before any poll is UNAVAILABLE (not yet attempted).
+            assert s["status"] == "unavailable"
+            assert s["lastAttemptAt"] is None
+            assert s["lastSuccessAt"] is None
+            assert s["errorCategory"] is None
+
+    def test_health_payload_status_mapping(self, sample_config: Config, sample_db: Database):
+        worker = UsageWorker(config=sample_config, db=sample_db, version="0.1.0-test")
+
+        def mk(status: SourceStatus, err: str | None) -> _SourceWorker:
+            return _SourceWorker(
+                source=CODEX, adapter=FakeSourceAdapter(), status=status,
+                last_error_category=err,
+            )
+
+        assert worker._health_status(mk(SourceStatus.SUCCESS, None)) == "healthy"
+        assert worker._health_status(mk(SourceStatus.UNAVAILABLE, "unsupported")) == "unavailable"
+        assert worker._health_status(mk(SourceStatus.ERROR, "authentication")) == "operator_action"
+        assert worker._health_status(mk(SourceStatus.ERROR, "timeout")) == "retrying"
+
+        # Mixed fleet: two healthy, one retrying, one operator_action.
+        # _workers is a dict keyed by source ID in SOURCE_DEFS order:
+        #   codex, antigravity, openrouter-account, openrouter-key
+        _workers = list(worker._workers.values())
+        for w in _workers:
+            w.status = SourceStatus.SUCCESS
+            w.last_error_category = None
+            w.last_success = datetime.now(UTC).isoformat()
+        _workers[0].status = SourceStatus.ERROR   # codex
+        _workers[0].last_error_category = "timeout"
+        _workers[2].status = SourceStatus.ERROR   # openrouter-account
+        _workers[2].last_error_category = "not_configured"
+
+        payload = worker.health_payload()
+        assert payload["serviceStatus"] == "degraded"
+        by_id = {s["id"]: s for s in payload["sources"]}
+        assert by_id["codex"]["status"] == "retrying"
+        assert by_id["codex"]["errorCategory"] == "timeout"
+        assert by_id["openrouter-account"]["status"] == "operator_action"
+        assert by_id["antigravity"]["status"] == "healthy"
+        assert by_id["openrouter-key"]["status"] == "healthy"
+        assert by_id["openrouter-key"]["errorCategory"] is None
 
     def test_usage_payload_structure(self, sample_config: Config, sample_db: Database):
         worker = UsageWorker(config=sample_config, db=sample_db, version="0.1.0-test")
