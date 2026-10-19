@@ -224,7 +224,29 @@ class TestAnalyze:
         failures, _, _ = watch.analyze(
             samples, suffix="primary", require_reset=False
         )
-        assert any("no window was observed" in failure for failure in failures)
+        assert any("no judgeable window" in failure for failure in failures)
+
+    def test_a_window_with_no_signal_cannot_pass(self, watch):
+        """Window objects that hold no reset time or pace judge nothing."""
+        samples = [
+            ("2026-10-19T19:38:07Z", {"id": "codex:codex:primary"}),
+            ("2026-10-19T19:39:07Z", {"id": "codex:codex:primary"}),
+        ]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert any("no judgeable window" in failure for failure in failures)
+
+    def test_a_non_object_window_does_not_crash(self, watch):
+        """Valid JSON that is not an object cannot be filtered by read_log."""
+        samples = [
+            ("2026-10-19T19:38:07Z", "not-a-dict"),
+            ("2026-10-19T19:39:07Z", _window()),
+        ]
+        failures, _, _ = watch.analyze(
+            samples, suffix="primary", require_reset=False
+        )
+        assert not any("Traceback" in failure for failure in failures)
 
     def test_a_reset_with_a_stale_expectation_fails(self, watch):
         """A pace left on the window that just ended reads ~100."""

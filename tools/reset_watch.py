@@ -113,6 +113,18 @@ def find_window(usage: dict[str, Any], suffix: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def _is_judgeable(window: Any) -> bool:
+    """Whether a sample carries anything the rules can act on.
+
+    Guards against a vacuous pass: a log of window objects that hold no reset
+    time and no pace reading satisfies "a window was observed" while failing
+    every per-sample rule, so replay would report success.
+    """
+    return isinstance(window, dict) and bool(
+        window.get("resetsAt") or window.get("pace")
+    )
+
+
 def detect_reset(
     previous: Optional[dict[str, Any]], current: Optional[dict[str, Any]]
 ) -> Optional[str]:
@@ -198,14 +210,17 @@ def analyze(
         failures.append(
             f"not enough samples to judge anything: {len(samples)} recorded"
         )
-    elif not any(window for _, window in samples):
+    elif not any(_is_judgeable(window) for _, window in samples):
         failures.append(
-            "no window was observed in any sample: nothing to judge "
-            "(a log recorded while the API was failing looks like this)"
+            "no judgeable window was observed in any sample: nothing to judge "
+            "(a log recorded while the API was failing looks like this, and a "
+            "window needs a reset time or a pace reading to say anything)"
         )
 
     for at, window in samples:
-        if not window:
+        if not isinstance(window, dict):
+            # A hand-edited or truncated log can hold a non-object here;
+            # ``read_log`` cannot catch it because it is valid JSON.
             continue
         reason = detect_reset(previous, window)
         if reason:
@@ -371,16 +386,23 @@ def main() -> int:
                     status_failures.append(f"/api/v1/usage returned {status}")
                 if hist_status == 200:
                     history_lengths.append(len(history.get("observations", [])))
+                else:
+                    status_failures.append(
+                        f"/api/v1/usage/history returned {hist_status}"
+                    )
 
                 window = find_window(usage, args.suffix) if status == 200 else None
                 at = _now()
                 # Live feedback only: the verdict comes from ``analyze`` below,
-                # but a detached 50-minute soak needs to show progress. Uses the
-                # same ``detect_reset`` the analysis uses, so the two agree.
-                reason = detect_reset(last_window, window)
-                if reason:
-                    print(f"RESET detected at {at}: {reason}")
-                last_window = window
+                # but a detached 50-minute soak needs to show progress. The
+                # previous sample is advanced under the same rule ``analyze``
+                # uses — a null window is skipped rather than replacing the last
+                # real one — so the two cannot disagree about a reset.
+                if isinstance(window, dict):
+                    reason = detect_reset(last_window, window)
+                    if reason:
+                        print(f"RESET detected at {at}: {reason}")
+                    last_window = window
                 samples.append((at, window))
                 log.write(json.dumps({"at": at, "sample": len(samples) - 1, "window": window}) + "\n")
                 log.flush()

@@ -46,7 +46,10 @@ Verdict: capable, and usable on this host out of the box. The default
 `codex_transport = "stdio"` needs no daemon and no host policy change, so the
 AppArmor user-namespace restriction below is irrelevant to the service. Selecting
 the `socket` transport instead reports the Codex source as
-`network`/`unavailable` until that restriction is lifted for the daemon.
+`network`/`unavailable` until that restriction is lifted for the daemon. One
+deployment caveat applies to either transport: the service account needs a
+writable `$HOME` for `~/.codex` — see "the unit's sandbox would have starved the
+Codex child" under the verification results.
 
 ## Antigravity
 

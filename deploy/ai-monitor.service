@@ -15,8 +15,9 @@ User=ai-monitor
 Group=ai-monitor
 WorkingDirectory=/opt/ai-monitor
 
-# Credentials live in a 0600 config file owned by the service account, never
-# in this unit, the environment, or a world-readable path.
+# Credentials live in a 0640 config file owned by root and readable by the
+# service account's group, never in this unit, the environment, or a
+# world-readable path.
 ExecStart=/opt/ai-monitor/venv/bin/ai-monitor --config /etc/ai-monitor/config.json
 
 Restart=always

@@ -56,14 +56,23 @@ def leaked(secret: str, *payloads: Any) -> bool:
     return False
 
 
-def _redact(value: Any, secret: str) -> Any:
-    """Replace the secret with a placeholder, recursively."""
+def _redact(value: Any, secrets: Any) -> Any:
+    """Replace every secret with a placeholder, recursively.
+
+    ``secrets`` may be a single string or a list of them; a deployment can have
+    both an inference and a management key configured at once.
+    """
+    if isinstance(secrets, str):
+        secrets = [secrets]
+    secrets = [secret for secret in secrets if secret]
     if isinstance(value, str):
-        return value.replace(secret, "<redacted>") if secret else value
+        for secret in secrets:
+            value = value.replace(secret, "<redacted>")
+        return value
     if isinstance(value, dict):
-        return {key: _redact(item, secret) for key, item in value.items()}
+        return {key: _redact(item, secrets) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_redact(item, secret) for item in value]
+        return [_redact(item, secrets) for item in value]
     return value
 
 
@@ -87,7 +96,10 @@ def main() -> int:
         )
         return 2
 
-    secret = management or inference
+    # Every configured credential, not just the preferred one: both can be
+    # present, and the stream that does *not* use a given key can still echo it
+    # back in a provider-controlled field.
+    secrets = [value for value in (management, inference) if value]
     workdir = tempfile.mkdtemp(prefix="ai-monitor-openrouter-check-")
     config = Config(
         data_dir=workdir,
@@ -111,11 +123,11 @@ def main() -> int:
             except CollectionError as exc:
                 record["status"] = "failed"
                 record["errorCategory"] = exc.category
-                record["error"] = _redact(str(exc), secret)
+                record["error"] = _redact(str(exc), secrets)
             except Exception as exc:  # noqa: BLE001
                 record["status"] = "failed"
                 record["errorCategory"] = "unexpected"
-                record["error"] = _redact(str(exc), secret)
+                record["error"] = _redact(str(exc), secrets)
             else:
                 source = get_source_def(source_id)
                 raw = enrich_observation(source, raw, PaceSettings(), {}, None, {})
@@ -136,7 +148,7 @@ def main() -> int:
                     for window in observation.budgets
                 ]
                 # A secret must never reach a stored or returned payload.
-                if leaked(secret, serialized, raw):
+                if any(leaked(value, serialized, raw) for value in secrets):
                     any_leak = True
                     record["leakedSecret"] = True
             finally:
@@ -151,7 +163,10 @@ def main() -> int:
     # Redacted before printing: when ``leaked`` fires, the offending payload is
     # exactly what must not reach stdout, and this dump happens before the FAIL
     # line below.
-    print(json.dumps(_redact({"streams": outcomes}, secret), indent=2, sort_keys=True))
+    payload: Any = {"streams": outcomes}
+    for value in secrets:
+        payload = _redact(payload, value)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     print()
     print(f"collected: {ok or 'none'}")
     print(f"failed:    {failed or 'none'}")

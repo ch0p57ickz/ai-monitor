@@ -15,7 +15,7 @@ approval. Treat the steps as reviewed-but-unexecuted until the first install.
 | Path | Purpose |
 | --- | --- |
 | `/opt/ai-monitor` | Code checkout and virtualenv (`venv/`) |
-| `/etc/ai-monitor/config.json` | Configuration, mode `0600`, owner `ai-monitor` |
+| `/etc/ai-monitor/config.json` | Configuration, mode `0640`, owner `root`, group `ai-monitor` |
 | `/var/lib/ai-monitor/usage.db` | SQLite database (WAL), persistent state |
 | `/home/ai-monitor` | Service account home (Codex socket, Antigravity CLI) |
 | `deploy/ai-monitor.service` | Unit file in this repository |
@@ -126,6 +126,10 @@ The JSON Lines log is the raw evidence; results are recorded in
 
 ```sh
 # 1. Dedicated unprivileged account with its own home.
+# The home path must match the unit: deploy/ai-monitor.service lists
+# /home/ai-monitor in ReadWritePaths= because ProtectSystem=strict would
+# otherwise make it read-only and the Codex CLI could not write ~/.codex.
+# ReadWritePaths= requires the path to exist, so use this exact --home-dir.
 sudo useradd --system --create-home --home-dir /home/ai-monitor --shell /usr/sbin/nologin ai-monitor
 
 # 2. Code and virtualenv, owned by the service account.
@@ -145,7 +149,11 @@ sudoedit /etc/ai-monitor/config.json   # set codex_bin, the agy path, keys
 python3 -c 'import secrets; print(secrets.token_hex(32))'
 # Then set "account_digest_key" to that value in the config.
 
-# 4. Unit, then start.
+# 4. Unit, then start. Confirm the service account's home is writable first:
+# the unit fails to start if /home/ai-monitor does not exist, and the Codex
+# child fails if it exists but is not writable.
+id ai-monitor && sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" \
+  && echo "home is writable"
 sudo install -m 0644 deploy/ai-monitor.service /etc/systemd/system/ai-monitor.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-monitor
@@ -160,8 +168,7 @@ Give the service account its own provider sign-in before expecting data:
 # Verified on 2026-10-19: `codex app-server` dies outright when $HOME is
 # read-only, and fails with "codex account authentication required" when that
 # home has no ~/.codex/auth.json. So sign the *service account* in, not the
-# operator, and check the home exists before enabling the unit:
-id ai-monitor && sudo -u ai-monitor test -w "$(getent passwd ai-monitor | cut -d: -f6)" && echo "home is writable"
+# operator (step 4 checks the home is writable):
 sudo -u ai-monitor codex login      # or copy an auth.json into /home/ai-monitor/.codex
 
 # Codex, default (stdio): nothing else to prepare. The service starts

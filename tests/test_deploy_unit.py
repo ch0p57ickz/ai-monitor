@@ -38,13 +38,18 @@ def _directive_values(text: str, directive: str) -> list[str]:
         if stripped.startswith("#") or "=" not in stripped:
             continue
         key, _, value = stripped.partition("=")
-        if key.strip() == directive:
-            values.extend(value.split())
+        if key.strip() != directive:
+            continue
+        # Drop a trailing inline comment, so `ProtectSystem=strict  # keep`
+        # does not read as three values.
+        value = value.split("#", 1)[0]
+        values.extend(value.split())
     return values
 
 
 def test_the_unit_exists(unit_text):
-    assert "ExecStart=" in unit_text
+    assert _directive_values(unit_text, "ExecStart"), "the unit needs ExecStart="
+    assert "--config" in unit_text.split("ExecStart=", 1)[1].splitlines()[0]
 
 
 def test_state_directory_is_the_service_accounts_state(unit_text):
@@ -56,6 +61,12 @@ def test_the_codex_home_stays_writable_under_protect_system_strict(unit_text):
     protect_system = _directive_values(unit_text, "ProtectSystem")
     assert protect_system == ["strict"], (
         "if ProtectSystem changes, re-check whether $HOME needs to stay writable"
+    )
+    # ProtectHome=true makes /home inaccessible, and ReadWritePaths= cannot be
+    # nested inside InaccessiblePaths=, so the home would break again by a
+    # different route.
+    assert _directive_values(unit_text, "ProtectHome") == ["false"], (
+        "ProtectHome=true hides /home, which ReadWritePaths= cannot override"
     )
     writable = _directive_values(unit_text, "ReadWritePaths")
     assert SERVICE_HOME in writable, (
@@ -69,11 +80,11 @@ def test_the_codex_home_stays_writable_under_protect_system_strict(unit_text):
 def test_credentials_are_not_passed_in_the_unit(unit_text):
     """Credentials belong in the config file, not the unit or the environment."""
     for line in unit_text.splitlines():
-        if line.strip().startswith("ExecStart="):
-            assert "--config" in line
-        assert "API_KEY" not in line
-        assert "TOKEN" not in line
-        assert "SECRET" not in line
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for marker in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"):
+            assert marker not in stripped, f"{marker} must not appear in the unit"
 
 
 def test_the_unit_restarts_and_keeps_state(unit_text):
@@ -81,3 +92,9 @@ def test_the_unit_restarts_and_keeps_state(unit_text):
     assert _directive_values(unit_text, "Environment") == [
         "AI_MONITOR_DATA_DIR=/var/lib/ai-monitor"
     ]
+
+
+def test_credentials_file_mode_matches_the_runbook(unit_text):
+    """The unit's comment, the report's table and the install step must agree."""
+    runbook = (UNIT.parent.parent / "docs" / "gx10-runbook.md").read_text("utf-8")
+    assert "0750" in runbook and "0640" in runbook

@@ -124,6 +124,15 @@ class TestExplain:
         )
         assert notes == []
 
+    def test_account_with_no_credential_at_all_is_explained(self, check):
+        """Defensive: unreachable from `main`, which exits 2 first."""
+        notes = check._explain(
+            self._outcomes("failed", "failed", account="not_configured", key="not_configured"),
+            management=False,
+            inference=False,
+        )
+        assert any("OPENROUTER_MGMT_KEY" in note for note in notes)
+
     def test_fallback_balance_is_flagged_when_it_works(self, check):
         notes = check._explain(
             self._outcomes("success", "success"), management=False, inference=True
