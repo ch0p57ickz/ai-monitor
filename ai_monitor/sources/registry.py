@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from ..redact import redact_text
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import Config
 
@@ -280,9 +282,12 @@ class AntigravityAdapter(SourceAdapter):
                     "unavailable",
                     "antigravity usage interface not supported by this variant",
                 )
+            # Provider stderr can contain tokens or account identifiers, so it
+            # is redacted before it enters the error message (and any log).
             raise CollectionError(
                 "internal",
-                f"agy usage failed (exit {proc.returncode}): {proc.stderr.strip()[:200]}",
+                f"agy usage failed (exit {proc.returncode}): "
+                f"{redact_text(proc.stderr)}",
             )
 
         if not proc.stdout.strip():

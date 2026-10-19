@@ -1,0 +1,4 @@
+{
+  "rateLimitsByLimitId": ["unexpected", "list", "shape"],
+  "rateLimits": {"primary": {"usedPercent": 10.0, "resetsIn": 900}}
+}

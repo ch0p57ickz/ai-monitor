@@ -1,0 +1,6 @@
+{
+  "buckets": [
+    {"scope": "session", "group": "workspace-alpha", "model": "claude-sonnet-4"},
+    {"scope": "session", "group": "workspace-beta", "model": "claude-opus-4", "usedPercent": 15.5}
+  ]
+}

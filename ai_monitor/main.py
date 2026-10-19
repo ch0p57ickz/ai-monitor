@@ -14,6 +14,7 @@ from ai_monitor import __version__
 from ai_monitor.config import Config, ConfigError, load_config
 from ai_monitor.db import Database
 from ai_monitor.http import serve_http
+from ai_monitor.redact import install_redaction
 from ai_monitor.sources.registry import default_registry
 from ai_monitor.state import UsageWorker
 
@@ -60,6 +61,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    # Nothing that reaches a log line may contain credentials, tokens, email
+    # addresses, or a full provider payload. The filter goes on the handlers,
+    # because records from child loggers bypass logger-level filters.
+    install_redaction()
 
     try:
         config = load_config(args.config)

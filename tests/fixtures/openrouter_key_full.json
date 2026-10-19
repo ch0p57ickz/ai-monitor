@@ -1,0 +1,10 @@
+{
+  "data": {
+    "label": "test-key",
+    "usage": 10.0,
+    "limit": 50.0,
+    "limit_remaining": 40.0,
+    "limit_reset": "monthly",
+    "is_free_tier": false
+  }
+}

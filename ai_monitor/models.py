@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from .redact import redact_value
+
 
 def utc_now_iso() -> str:
     """Current UTC time as ISO-8601 with second precision and 'Z' suffix."""
@@ -281,7 +283,9 @@ def normalize_observation(source: SourceDef, raw: dict[str, Any]) -> Observation
         quota_windows=quota_windows,
         budgets=budgets,
         error_category=error_category,
-        notes=raw.get("notes"),
+        # Notes are persisted and may be surfaced later, so redact them at this
+        # single choke point (no credentials, tokens, emails, or full payloads).
+        notes=redact_value(raw.get("notes")) if raw.get("notes") else None,
     )
 
 

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "auth failed for admin@example.com using sk-live-abcdef0123456789 and csrf_token=abcdef0123456789abcdef",
+    "code": 401
+  }
+}

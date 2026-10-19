@@ -1,0 +1,5 @@
+{
+  "rateLimitsByLimitId": {
+    "5h": {"primary": {"usedPercent": 0.0, "resetsIn": 60}}
+  }
+}

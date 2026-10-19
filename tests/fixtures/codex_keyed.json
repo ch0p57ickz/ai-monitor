@@ -1,0 +1,11 @@
+{
+  "rateLimitsByLimitId": {
+    "5h": {
+      "primary": {"usedPercent": 42.5, "resetsIn": 3600},
+      "secondary": {"usedPercent": 12.0, "resetsIn": 7200}
+    },
+    "7d": {
+      "primary": {"usedPercent": 70.0, "resetsIn": 604800}
+    }
+  }
+}
