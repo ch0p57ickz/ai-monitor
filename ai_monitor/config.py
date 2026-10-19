@@ -96,13 +96,15 @@ class Config:
     openrouter_interval: float = DEFAULT_OPENROUTER_INTERVAL
 
     codex_app_server_socket: str = ""
-    # How the Codex adapter reaches the app-server: ``socket`` connects to an
-    # already-running app-server control socket (the daemon), ``stdio`` spawns
-    # `codex app-server --listen stdio://` as a child process and speaks the
-    # same protocol over its pipes. ``stdio`` needs no daemon, which matters on
-    # hosts where the daemon cannot start (for example when AppArmor blocks the
-    # bubblewrap sandbox's user namespace).
-    codex_transport: str = "socket"
+    # How the Codex adapter reaches the app-server: ``stdio`` (the default)
+    # spawns `codex app-server --listen stdio://` as a child process and speaks
+    # the protocol over its pipes; ``socket`` connects to an already-running
+    # app-server control socket (the daemon) instead. ``stdio`` needs no daemon
+    # and no host policy change, so it is the default: it is the only transport
+    # that works where the daemon cannot start, for example when AppArmor blocks
+    # the bubblewrap sandbox's user namespace, and the rate-limit read runs no
+    # sandboxed tools.
+    codex_transport: str = CODEX_TRANSPORT_STDIO
     codex_bin: str = "codex"
     codex_timeout_seconds: int = 10
 

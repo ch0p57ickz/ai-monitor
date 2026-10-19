@@ -582,18 +582,25 @@ class TestRegistry:
 
     def test_codex_adapter_no_socket_configured(self, sample_config: Config):
         adapter = CodexAdapter()
+        cfg = dataclasses.replace(sample_config, codex_transport="socket")
         with pytest.raises(CollectionError) as exc_info:
-            adapter.fetch(sample_config)
+            adapter.fetch(cfg)
         assert exc_info.value.category == "not_configured"
 
     def test_codex_adapter_socket_absent(self, sample_config: Config, tmp_path):
         cfg = dataclasses.replace(
-            sample_config, codex_app_server_socket=str(tmp_path / "missing.sock")
+            sample_config,
+            codex_transport="socket",
+            codex_app_server_socket=str(tmp_path / "missing.sock"),
         )
         adapter = CodexAdapter()
         with pytest.raises(CollectionError) as exc_info:
             adapter.fetch(cfg)
         assert exc_info.value.category == "unsupported"
+
+    def test_codex_adapter_default_transport_is_stdio(self, sample_config: Config):
+        """The default must not depend on a daemon being installed."""
+        assert sample_config.codex_transport == "stdio"
 
     def test_openrouter_adapter_no_key(self, sample_config: Config):
         adapter = OpenRouterAccountAdapter()

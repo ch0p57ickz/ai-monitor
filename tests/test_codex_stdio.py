@@ -93,9 +93,10 @@ class TestStdioConfig:
             )
         assert exc_info.value.category == "invalid_value"
 
-    def test_socket_remains_the_default(self, tmp_path: Path):
+    def test_stdio_is_the_default(self, tmp_path: Path):
+        """stdio needs no daemon and no host policy change, so it is the default."""
         config = Config(data_dir=str(tmp_path))
-        assert config.codex_transport == "socket"
+        assert config.codex_transport == "stdio"
         assert config.codex_bin == "codex"
 
 

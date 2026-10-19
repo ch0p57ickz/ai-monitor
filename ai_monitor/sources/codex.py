@@ -2,12 +2,12 @@
 
 Two transports reach the same interface:
 
-- ``socket`` (default) connects to an already-running app-server control socket
-  (the ``codex app-server daemon`` socket).
-- ``stdio`` spawns ``codex app-server --listen stdio://`` as a child process and
-  speaks the same protocol over its pipes. No daemon is involved, so this works
-  on hosts where the daemon cannot start — for example when AppArmor blocks the
-  user namespace its bubblewrap sandbox needs.
+- ``stdio`` (default) spawns ``codex app-server --listen stdio://`` as a child
+  process and speaks the same protocol over its pipes. No daemon is involved, so
+  this works on hosts where the daemon cannot start — for example when AppArmor
+  blocks the user namespace its bubblewrap sandbox needs.
+- ``socket`` connects to an already-running app-server control socket (the
+  ``codex app-server daemon`` socket) instead.
 
 Either way the adapter opens a session (send ``initialize``, read its reply),
 then sends ``account/rateLimits/read`` and converts the result into a
@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from .. import __version__
+from ..config import CODEX_TRANSPORT_STDIO
 from ..identity import account_identity, derive_account_id
 from .registry import CollectionError, SourceAdapter
 
@@ -234,7 +235,7 @@ class CodexAdapter(SourceAdapter):
         self._session: Optional["_StdioSession"] = None
 
     def fetch(self, config) -> dict[str, Any]:
-        if getattr(config, "codex_transport", "socket") == "stdio":
+        if config.codex_transport == CODEX_TRANSPORT_STDIO:
             result = self._fetch_stdio(config)
         else:
             result = self._fetch_socket(config)
@@ -284,7 +285,7 @@ class CodexAdapter(SourceAdapter):
         involved, which is what makes this transport work on hosts where the
         app-server daemon cannot start.
         """
-        if not getattr(config, "codex_bin", ""):
+        if not config.codex_bin:
             raise CollectionError(
                 "not_configured", "codex_bin is not configured for the stdio transport"
             )

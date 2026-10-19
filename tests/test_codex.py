@@ -315,6 +315,9 @@ def _serve_once(
 def _config(tmp_path: Path, sock: Path) -> Config:
     return Config(
         data_dir=str(tmp_path / "data"),
+        # These are control-socket tests, so the transport is explicit: stdio is
+        # the default and would spawn a child instead.
+        codex_transport="socket",
         codex_app_server_socket=str(sock),
         codex_timeout_seconds=5,
     )
@@ -551,6 +554,7 @@ class TestHandshake:
         thread = _serve_once(sock, hang=True)
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=1,
         )
@@ -565,6 +569,7 @@ class TestHandshake:
         thread = _serve_once(sock, hang_after_initialize=True)
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=1,
         )

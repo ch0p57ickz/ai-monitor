@@ -30,7 +30,7 @@ persistent data directory).
 | Control socket | `~/.codex/app-server-control/app-server-control.sock` exists while `codex app-server daemon` runs, but on this host it accepts then closes every connection. The official `codex app-server proxy` fails identically (`failed to copy data from stdin to socket: Broken pipe`), so the daemon — not the client — is at fault. A directly started `codex app-server --listen stdio://` works |
 | Daemon root cause | `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu 24.04 default) blocks the user namespace that Codex's bubblewrap sandbox needs: `bwrap: setting up uid map: Permission denied`, and the daemon logs `Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces`. `kernel.unprivileged_userns_clone` is already `1`, so the AppArmor restriction is the blocker, not the userns sysctl |
 | Daemon fix (needs root) | Either grant the binary a user-namespace AppArmor profile (targeted), or relax the restriction system-wide with `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (weakens host hardening). Neither is needed for the service: the stdio transport below avoids the daemon entirely |
-| Transports | `codex_transport` selects how the adapter reaches the interface. `socket` (default) uses the daemon control socket; `stdio` starts `codex app-server --listen stdio://` as a child and speaks the same protocol over its pipes. The stdio path runs no sandboxed tools, so the AppArmor user-namespace restriction does not apply to it. `codex_bin` names the executable (default `codex`) |
+| Transports | `codex_transport` selects how the adapter reaches the interface. `stdio` (default) starts `codex app-server --listen stdio://` as a child and speaks the same protocol over its pipes; `socket` uses the daemon control socket instead. The stdio path runs no sandboxed tools, so the AppArmor user-namespace restriction does not apply to it. `codex_bin` names the executable (default `codex`) |
 | Auth state | `~/.codex/auth.json` present (contents not read, not reported) |
 | Protocol | Confirmed from `codex app-server generate-json-schema` and a live session: the connection must send `initialize` first (any other request is answered with a closed connection), then `account/rateLimits/read` (`Account/rateLimits/readRequest`, response `GetAccountRateLimitsResponse`). Server notifications (`configWarning`, `account/updated`) arrive between replies and must be skipped |
 | Rate-limit fields | `rateLimitsByLimitId` (keyed) with a `rateLimits` single-view mirror; each snapshot has `primary`/`secondary` `RateLimitWindow` objects carrying `usedPercent` (integer), `windowDurationMins`, and `resetsAt` (Unix seconds). `accountId` is defined but was absent in the live payload |
@@ -42,10 +42,11 @@ used against `expectedUsedPercent` 27.4 → `at`; `accountId` was null in the
 live payload. Percentages move with use; the classification and the presence
 of real reset bounds are the point.
 
-Verdict: capable, and usable on this host with `codex_transport = "stdio"`,
-which needs no daemon and no host policy change. With the default `socket`
-transport the service reports the Codex source as `network`/`unavailable`
-until the AppArmor user-namespace restriction is lifted for the daemon.
+Verdict: capable, and usable on this host out of the box. The default
+`codex_transport = "stdio"` needs no daemon and no host policy change, so the
+AppArmor user-namespace restriction below is irrelevant to the service. Selecting
+the `socket` transport instead reports the Codex source as
+`network`/`unavailable` until that restriction is lifted for the daemon.
 
 ## Antigravity
 
@@ -158,7 +159,7 @@ this host).
 
 | Source | Enable now? | Notes |
 | --- | --- | --- |
-| `codex` | Yes | Either `codex_transport = "stdio"` (no daemon needed; verified live) or a healthy app-server daemon socket. Protocol and pace math are verified live |
+| `codex` | Yes | Default `codex_transport = "stdio"` needs no daemon (verified live). A healthy app-server daemon socket also works via `codex_transport = "socket"`. Protocol and pace math are verified live |
 | `antigravity` | No (session-only variant) | Adapter enabled but expected to report `unavailable`; no weekly quota to collect |
 | `openrouter-account` | No (no credential) | Awaiting a management/provisioning credential for `/api/v1/credits` (`openrouter_management_key`, falling back to `openrouter_api_key`); error category `not_configured` until set, `authorization` if a non-management key is used |
 | `openrouter-key` | No (no credential) | Awaiting credential for `/api/v1/key`; error category `not_configured` until set |

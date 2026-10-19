@@ -131,6 +131,7 @@ class TestCodexAccountId:
         thread = _serve_once(sock, {**KEYED, "account": {"id": "acct-1"}})
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
             account_digest_key="digest-key-0123456789",
@@ -147,6 +148,7 @@ class TestCodexAccountId:
         thread = _serve_once(sock, {**KEYED, "account": {"id": "acct-1"}})
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
         )
@@ -160,6 +162,7 @@ class TestCodexAccountId:
         thread = _serve_once(sock, KEYED)
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
             account_digest_key="digest-key-0123456789",
@@ -181,6 +184,7 @@ class TestCodexAccountId:
         )
         cfg = Config(
             data_dir=str(tmp_path / "data"),
+            codex_transport="socket",
             codex_app_server_socket=str(sock),
             codex_timeout_seconds=5,
             account_digest_key="digest-key-0123456789",

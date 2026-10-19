@@ -56,6 +56,26 @@ sources coexist independently. Results are recorded in
 python3 tools/codex_live_check.py
 ```
 
+## Verify both OpenRouter streams (task 5.1 evidence)
+
+The two OpenRouter streams use different endpoints and different credential
+permissions, so one can collect while the other fails — that partial result is
+what this check verifies. It reads credentials from the environment only and
+never prints them, so export them in the shell rather than passing them as
+arguments:
+
+```sh
+set -a; . ./.env; set +a
+PYTHONPATH=. python3 tools/openrouter_live_check.py
+```
+
+It reports each stream's status, its error category, and its budget fields, then
+asserts that at least one stream collected and that no credential appeared in an
+observation payload. Exit codes: `0` collected, `2` no credential present (a
+configuration problem), `1` anything else. Without a management key the
+account-credit stream falls back to the inference key and may report
+`authorization` while the current-key stream succeeds.
+
 ## Watch a quota window across a reset (task 5.1 evidence)
 
 A reset is where the pace math is easiest to get wrong: the comparison target
@@ -110,20 +130,19 @@ sudo systemctl enable --now ai-monitor
 Give the service account its own provider sign-in before expecting data:
 
 ```sh
-# Codex, option A (default): start the app-server as the service account so the
-# control socket exists, then confirm the socket actually answers.
+# Codex, default (stdio): nothing to prepare. The service starts
+# `codex app-server --listen stdio://` itself and speaks the protocol over the
+# child's pipes, which needs no daemon and no host policy change. The rate-limit
+# read runs no sandboxed tools, so the AppArmor restriction described below does
+# not apply. `codex_bin` must resolve for the service account.
+
+# Codex, alternative (socket): start the app-server as the service account so
+# the control socket exists, set "codex_transport": "socket", then confirm the
+# socket actually answers.
 sudo -u ai-monitor codex app-server daemon start
 sudo -u ai-monitor ls -l /home/ai-monitor/.codex/app-server-control/
 # `codex app-server proxy` failing with a broken pipe means the daemon accepts
 # and then closes every connection. See the AppArmor note below.
-
-# Codex, option B: skip the daemon entirely. Set
-#   "codex_transport": "stdio"
-# and the service starts `codex app-server --listen stdio://` itself, speaking
-# the same protocol over the child's pipes. This needs no daemon and no host
-# policy change, and is the recommended setting when the daemon is unhealthy:
-# the rate-limit read runs no sandboxed tools, so the AppArmor restriction
-# below does not apply.
 
 # Verify either transport with the real adapter (spawns codex itself):
 python3 tools/codex_live_check.py
@@ -132,10 +151,11 @@ python3 tools/codex_live_check.py
 # user-namespace restriction:
 #   sysctl kernel.apparmor_restrict_unprivileged_userns   -> 1
 #   bwrap --ro-bind / / --dev /dev true   -> "setting up uid map: Permission denied"
-# If you need the daemon, grant the codex binary a user-namespace AppArmor
-# profile, or, to relax it system-wide (weakens host hardening):
+# Only the socket transport needs the daemon, so the simplest fix is to leave the
+# hardening in place and use the default stdio transport. If you do need the
+# daemon, grant the codex binary a user-namespace AppArmor profile, or relax the
+# restriction system-wide (weakens host hardening):
 #   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-# Otherwise use "codex_transport": "stdio" and leave the hardening in place.
 
 # Antigravity: the installed variant on this host has no usage subcommand, so
 # `antigravity` is expected to report `unavailable` (see the capability report).
