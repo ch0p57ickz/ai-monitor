@@ -73,48 +73,6 @@ class FakeSourceAdapter(SourceAdapter):
         return self._raw
 
 
-# ---------------------------------------------------------------------------
-# Raw payload shapes (mirrors of real provider outputs)
-# ---------------------------------------------------------------------------
-
-CODEX_RAW: dict[str, Any] = {
-    "quota": [
-        {
-            "id": "codex-weekly",
-            "label": "Weekly quota",
-            "scope": "account",
-            "group": "default",
-            "model": "gpt-5.4",
-            "used_percent": 42.0,
-            "remaining_percent": 58.0,
-            "duration_minutes": 10080,
-            "resets_at": "2026-10-25T00:00:00Z",
-        }
-    ],
-}
-
-ANTIGRAVITY_RAW: dict[str, Any] = {
-    "quota": [
-        {
-            "id": "agy-session-1",
-            "label": "Session",
-            "scope": "session",
-            "group": "default",
-            "used_percent": 12.5,
-            "duration_minutes": 43200,
-        }
-    ],
-}
-
-OPENROUTER_ACCOUNT_RAW: dict[str, Any] = {
-    "limits": {"limit": 100.0, "usage": 30.0, "currency": "usd"},
-}
-
-OPENROUTER_KEY_RAW: dict[str, Any] = {
-    "data": {"limit": 50.0, "usage": 10.0, "currency": "usd"},
-}
-
-
 def codex_source() -> SourceDef:
     return get_source_def("codex")
 
