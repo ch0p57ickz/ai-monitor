@@ -47,6 +47,7 @@ def main():
     if mode == "die":
         return 3
 
+    initialized = False
     payload_path = os.environ.get("FAKE_PAYLOAD")
     if payload_path:
         with open(payload_path, encoding="utf-8") as handle:
@@ -65,6 +66,18 @@ def main():
         method = message.get("method")
         request_id = message.get("id")
         if method == "initialize":
+            if initialized:
+                # The real app-server rejects a second initialize on the same
+                # connection; the adapter must not send one.
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32600, "message": "Already initialized"},
+                    }
+                )
+                continue
+            initialized = True
             send({"jsonrpc": "2.0", "id": request_id, "result": {}})
             send({"method": "account/updated", "params": {"authMode": "chatgpt"}})
         elif method == "account/rateLimits/read":

@@ -134,10 +134,18 @@ class TestStdioTransport:
         assert obs.quota_windows[0].resets_at == "2025-10-09T08:53:20Z"
 
     def test_the_child_is_reused_across_polls(self, fake: Path):
+        """The child must be reused, not respawned per poll.
+
+        Regression: re-sending `initialize` on a reused child is rejected with
+        "Already initialized", which the real app-server does.
+        """
         adapter = CodexAdapter()
         try:
-            adapter.fetch(_config(fake))
-            adapter.fetch(_config(fake))
+            for _ in range(3):
+                out = adapter.fetch(_config(fake))
+                assert out["status"] == "success"
+                assert adapter._session is not None
+                assert adapter._session._initialized is True
         finally:
             adapter.close()
         assert _starts(fake) == 1, "the child must be reused, not respawned per poll"

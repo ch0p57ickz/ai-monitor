@@ -407,16 +407,18 @@ def _rpc_error(detail: Any) -> CollectionError:
 def _read_rate_limits(
     reader: _ResponseReader, send: Callable[[dict[str, Any]], None]
 ) -> Any:
-    """Run the two-request session over an already-open transport.
-
-    A fresh app-server session must send ``initialize`` first; anything else is
-    answered with a closed connection. The rate-limit read then follows on the
-    same session.
-    """
-    send(INITIALIZE_REQUEST)
-    reader.read_response(INITIALIZE_REQUEST["id"])
+    """Send the rate-limit read and return its result."""
     send(RATE_LIMITS_REQUEST)
     return reader.read_response(RATE_LIMITS_REQUEST["id"])
+
+
+def _initialize(
+    reader: _ResponseReader, send: Callable[[dict[str, Any]], None]
+) -> None:
+    """Open a session. Required once per connection: the app-server answers a
+    second ``initialize`` on the same connection with "Already initialized"."""
+    send(INITIALIZE_REQUEST)
+    reader.read_response(INITIALIZE_REQUEST["id"])
 
 
 def _socket_chunk_reader(sock: socket.socket) -> Callable[[float], bytes]:
@@ -460,6 +462,7 @@ def _rpc_call(socket_path: str, timeout: float) -> Any:
         def send(message: dict[str, Any]) -> None:
             sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
 
+        _initialize(reader, send)
         return _read_rate_limits(reader, send)
     except FileNotFoundError:
         raise _HandshakeError(
@@ -497,6 +500,7 @@ class _StdioSession:
     def __init__(self, command: list[str]) -> None:
         self.command = list(command)
         self._proc: Optional[subprocess.Popen] = None
+        self._initialized = False
         self._lock = threading.Lock()
         atexit.register(self.close)
 
@@ -518,6 +522,8 @@ class _StdioSession:
             raise CollectionError(
                 "network", f"could not start the codex app-server: {exc}"
             )
+        # A new child is a new session and must be initialized again.
+        self._initialized = False
         return self._proc
 
     def request(self, timeout: float) -> Any:
@@ -544,9 +550,13 @@ class _StdioSession:
                     )
 
             try:
+                if not self._initialized:
+                    _initialize(reader, send)
+                    self._initialized = True
                 return _read_rate_limits(reader, send)
             except Exception:
                 # A failed exchange leaves the child in an unknown state.
+                self._initialized = False
                 self._terminate()
                 raise
 
