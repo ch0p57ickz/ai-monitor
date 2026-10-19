@@ -358,15 +358,15 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Item | Value |
 | --- | --- |
 | Serve available | Yes (Serve is in the stable package; present in 1.102.4 and 1.104.1) |
-| Current HTTPS publications | Four mappings, all `(tailnet only)`: `3773`, `8443`, `8444`, `8445`; port `443` is free |
+| Current HTTPS publications | Four device mappings plus three Services, all `(tailnet only)`: device `3773`, `8443`, `8444`, `8445`; Services `svc:ai-monitor` on `443`, `svc:router-litellm`, `svc:vllm` |
 | Funnel | Off — `tailscale funnel status` reports every mapping as `(tailnet only)` |
 | HTTPS certificates | Enabled in the tailnet (the existing mappings already use `ts.net` names) |
 | Node and domain | `zoey` (`100.108.85.109`), `zoey.tail831c33.ts.net` |
 | Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
 | Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync`, `hermes`, `openclaw-gx10` — all `tag:agent`, owned by the `tagged-devices` identity rather than the operator |
-| Node ownership | User-owned, untagged (`tailscale status --json` shows no `Tags`, no advertised services) |
-| Service alternative | Viable and lower blast radius: Service access needs an explicit `svc:` grant, so the allow-all node policy is untouched. Requires tagging `zoey` (a Service host must be tag-based) and advertising the Service from `zoey` itself |
-| Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
+| Node ownership | Tagged `tag:zoey` as of 2026-10-19 (`tailscale status --json`, `Self.Tags`); user-owned and untagged before that |
+| Service (deployed) | Lower blast radius, and now in use: Service access needs an explicit `svc:` grant, so the allow-all *device* policy is untouched. `svc:ai-monitor` is advertised from the tagged `zoey`, with VIP `100.76.182.227` |
+| Plan | Publish the service port (bound to `127.0.0.1`) as the Service `svc:ai-monitor`, granted to the operator's devices only, with Funnel disabled. Deployed 2026-10-19; the device checks are still outstanding |
 
 ### Finding: the policy is allow-all, and its effect is observable
 

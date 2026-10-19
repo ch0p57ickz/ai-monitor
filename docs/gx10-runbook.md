@@ -557,7 +557,7 @@ sudo stat -c '%a %U:%G' /etc/ai-monitor/config.json
 journalctl -u ai-monitor --since '5 min ago' --no-pager | grep -Ei 'bearer|sk-|@' || true
 ```
 
-## Tailscale Serve (task 5.3, pending)
+## Tailscale Serve (task 5.3, deployed 2026-10-19)
 
 The service binds `127.0.0.1` only. Publication is via Tailscale Serve, never
 Funnel:
@@ -570,6 +570,44 @@ tailscale serve status
 `tailscale serve status` and `tailscale funnel status` run without `sudo` on this
 host, so the operator can confirm state before and after the change; only
 `tailscale serve` itself needs privileges.
+
+### Deployed state (read back from the node, 2026-10-19)
+
+`zoey` is tagged and the API is published as a **Service**, `svc:ai-monitor`. Read
+the state back from the node rather than the console:
+
+```sh
+tailscale serve status            # what is published, and whether it is tailnet-only
+tailscale funnel status           # must stay "(tailnet only)"
+tailscale status --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"].get("Tags"))'
+tailscale debug netmap | python3 -c '
+import json, sys
+caps = json.load(sys.stdin)["SelfNode"]["CapMap"]
+print("service-host:", caps.get("service-host"))
+print("services:", caps.get("services/ai-monitor"))
+'
+```
+
+Observed:
+
+| Fact | Value |
+| --- | --- |
+| Self tag | `tag:zoey` |
+| Service | `svc:ai-monitor`, endpoint `tcp:443`, proxying `http://127.0.0.1:8732` |
+| Service VIP | `100.76.182.227` (`fd7a:115c:a1e0::6528:b6e4`), from `SelfNode.CapMap["service-host"]["svc:ai-monitor"]` |
+| DNS | `ai-monitor.tail831c33.ts.net` resolves to the VIP |
+| Publication | `(tailnet only)`; Funnel off for every mapping |
+| The four earlier routes | `3773`, `8443`, `8444`, `8445` still published and tailnet-only; `8443` and `8444` answer HTTP 200 from the host |
+| Service access | one packet-filter rule for the VIP, admitting the operator's devices and no `tag:agent` node |
+| Device rules | the allow-all device rule is untouched, which is why the four earlier routes are unaffected |
+| Backend | nothing listens on `8732` until task 5.2 starts the service, so the Service answers 502 in the meantime |
+
+The Service path restricts anything at all for a reason visible in the packet
+filter: `*` in a grant expands to *device* addresses, so the allow-all rule that
+covers every device on every port does **not** cover a Service VIP. A Service is
+reachable only through its own grant, which is what makes the denial check
+possible without narrowing the device rules.
 
 ### Host state as surveyed (2026-10-19)
 
@@ -680,7 +718,10 @@ A denied connection is dropped rather than refused, so expect a timeout rather
 than a connection error. Re-running `tailscale debug netmap` on a disallowed node
 is the second half of the check: its filter should no longer list `zoey:443`.
 
-#### Alternative: publish the API as a Tailscale Service
+#### The path in use: publish the API as a Tailscale Service
+
+**This is what `zoey` runs.** The node-route form above remains the alternative,
+and is the one to use if tagging the host is not acceptable.
 
 A Service is the cleaner mechanism for this restriction, and it avoids the global
 port exclusion above entirely. Service access is granted explicitly — a
@@ -815,24 +856,31 @@ intent, and it satisfies the denied-device scenario without the collateral of th
 node-route form. The wording should name the Service explicitly so the acceptance
 criteria and the implementation agree.
 
-The agent dashboards are reported to run as Services for the same reason. That
-cannot be confirmed from `zoey`: `tailscale debug netmap` reports
-`CollectServices: false`, so this node does not collect Service information.
+The agent dashboards are reported to run as Services for the same reason. This
+node now collects Service information — `tailscale debug netmap` reports
+`CollectServices: true` — and `SelfNode.CapMap` carries the Service identities
+this node may host, with each VIP under `services/<name>[0].Addrs[0]`. So Service
+identity and VIPs are readable from `zoey`, without the console.
 
 ### Acceptance checks (operator present)
 
-1. **Intended client — macOS.** From `jamess-macbook-pro`, open
-   `https://zoey.tail831c33.ts.net/api/v1/version` and confirm the version JSON.
-2. **Intended client — iPhone.** From `iphone182-2`, open
-   `https://zoey.tail831c33.ts.net/health`.
-3. **Denied device.** From a `tag:agent` service node such as `rumi`, `happier`, or
+1. **The Service answers at all.** Start the service first (task 5.2) — until it
+   runs, nothing listens on `8732` and the Service returns 502. Then confirm the
+   API locally: `curl -s http://127.0.0.1:8732/api/v1/version`.
+2. **Intended client — macOS.** From `jamess-macbook-pro`, open
+   `https://ai-monitor.tail831c33.ts.net/api/v1/version` and confirm the version
+   JSON. The Service DNS name is the address, not `zoey.tail831c33.ts.net`: port
+   `443` on `zoey` itself is not served.
+3. **Intended client — iPhone.** From `iphone182-2`, open
+   `https://ai-monitor.tail831c33.ts.net/health`.
+4. **Denied device.** From a `tag:agent` service node such as `rumi`, `happier`, or
    `mira` — the natural choice, since those belong to the separate
-   `tagged-devices` identity and the policy grants the widget port to the
-   operator's devices only — confirm `443` fails rather than returning usage data,
-   and that `8443` still answers. This check is what the policy `tests` block
-   predicts; the device run is what proves it.
-4. **Funnel stays off.** `tailscale funnel status` must keep showing
-   `(tailnet only)` for every mapping, including the new one.
+   `tagged-devices` identity and the grant admits the operator's devices only —
+   confirm the Service URL fails rather than returning usage data, and that
+   `https://zoey.tail831c33.ts.net:8443/` still answers. This check is what the
+   packet filter predicts; the device run is what proves it.
+5. **Funnel stays off.** `tailscale funnel status` must keep showing
+   `(tailnet only)` for every mapping, including the Service.
 
-Steps 1-3 need the devices and the policy edit, so they are executed with the
-operator present. Step 4 and the survey above were run without privileges.
+Steps 2-4 need the devices, so they run with the operator present. Step 5 and the
+survey above run without privileges.
