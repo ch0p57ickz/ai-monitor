@@ -219,6 +219,33 @@ checks integrity before starting on the restored file, and lists `backups/` in
 the layout table. `deploy/config.example.json` also omitted `pace_tolerance` and
 `response_cap_bytes`, which the loader accepts; both are now present.
 
+### Finding: `.backup` overwrites its target, so a same-day name loses backups
+
+The procedure named the backup `usage-$(date +%F).db`. Verified on SQLite 3.45.1:
+`.backup` opens its target for writing, truncates it, and reports success
+without a word — a second backup on the same day therefore destroys the first,
+which may be the good one. The name now carries the time
+(`date -u +%FT%H%M%SZ`), the backup is integrity-checked as it is written, and
+the restore validates the source with `test -s` *before* the destructive
+`rm -f` of the sidecars rather than after.
+
+### Finding: the check could pass on a fresh poll instead of the restore
+
+The first version of the tool asserted only that the restarted service served at
+least one observation. Starting a worker polls immediately, so a *fresh*
+collection satisfied that assertion even when the restore had produced nothing —
+demonstrated by disabling the restore, which still printed "observations served
+after restore and restart: 1". The two errors making a correct restore fail and a
+missing restore pass are the same mistake in opposite directions: the check was
+not measuring what it claimed.
+
+It now fingerprints the backup file rather than the live database (fingerprinting
+the live database raced the next poll and could fail a correct restore), and the
+restart phase runs with provider binaries that cannot execute, so the only
+possible source of a served observation is the restored database. The served
+`collectedAt` must match a restored row. With the restore disabled the check now
+fails on three counts and exits 1.
+
 Still outstanding for 5.2 and 5.4, all needing the host:
 
 - installing the unit and confirming it starts under systemd;

@@ -15,7 +15,9 @@ runbook never created it.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -77,8 +79,24 @@ class TestCommands:
         assert len(argv) == 3
         assert argv[2] == ".backup '/b/a b.db'"
 
-    def test_integrity_check_is_the_documented_pragma(self, check):
-        assert check.integrity_command("/db") [2] == "pragma integrity_check;"
+    def test_integrity_check_is_the_documented_command(self, check):
+        """The runbook runs both statements; the helper must too."""
+        assert check.integrity_command("/db")[2] == (
+            "pragma integrity_check; select count(*) from observations;"
+        )
+
+    def test_directory_creation_is_the_documented_command(self, check, tmp_path):
+        target = tmp_path / "backups"
+        argv = check.create_dir_command(str(target))
+        assert argv[:5] == ["install", "-d", "-m", "0700", "-o"]
+        assert argv[-1] == str(target)
+
+    def test_the_directory_command_actually_creates_it(self, check, tmp_path):
+        """This is the command that silently failed in the runbook."""
+        target = tmp_path / "nested" / "backups"
+        result = subprocess.run(check.create_dir_command(str(target)))
+        assert result.returncode == 0
+        assert target.is_dir()
 
 
 class TestFingerprint:
@@ -95,12 +113,14 @@ class TestFingerprint:
         junk.write_text("not a database")
         assert check.fingerprint(str(junk)) is None
 
-    def test_it_never_writes_to_the_database(self, check, tmp_path):
+    def test_it_does_not_touch_the_database_file(self, check, tmp_path):
         db = tmp_path / "usage.db"
         _make_db(db, rows=1)
         before = db.stat().st_mtime_ns
+        size = db.stat().st_size
         check.fingerprint(str(db))
         assert db.stat().st_mtime_ns == before
+        assert db.stat().st_size == size
 
 
 class TestCompare:
@@ -163,33 +183,72 @@ class TestExampleConfigLoads:
         assert missing == set(), f"the example config omits: {sorted(missing)}"
 
 
+def _backup_section() -> str:
+    """The Backup section, or a loud failure if the headings moved.
+
+    ``split`` with a missing marker silently returns the rest of the file, which
+    would widen these assertions to the whole document instead of failing.
+    """
+    runbook = RUNBOOK.read_text("utf-8")
+    assert "## Backup" in runbook, "the Backup heading was renamed"
+    assert "## Rollback" in runbook, "the Rollback heading was renamed"
+    return runbook.split("## Backup", 1)[1].split("## Rollback", 1)[0]
+
+
 class TestRunbookBackupProcedure:
     def test_the_backup_directory_is_created_before_it_is_written_to(self):
-        runbook = RUNBOOK.read_text("utf-8")
-        section = runbook.split("## Backup", 1)[1].split("## Rollback", 1)[0]
+        section = _backup_section()
         create = section.find("install -d")
         write = section.find(".backup")
         assert create != -1, "the procedure never creates the backup directory"
         assert create < write, "the directory must be created before the backup"
 
     def test_the_procedure_uses_the_commands_the_tool_runs(self, check):
-        runbook = RUNBOOK.read_text("utf-8")
-        section = runbook.split("## Backup", 1)[1].split("## Rollback", 1)[0]
+        section = _backup_section()
         assert ".backup '" in section
         assert ".restore '" in section
         assert check.backup_command("db", "out")[2].startswith(".backup '")
         assert check.restore_command("db", "out")[2].startswith(".restore '")
 
     def test_the_restore_clears_stale_wal_sidecars(self):
-        runbook = RUNBOOK.read_text("utf-8")
-        section = runbook.split("## Backup", 1)[1].split("## Rollback", 1)[0]
+        section = _backup_section()
         assert "usage.db-wal" in section, (
             "a leftover -wal can replay over the restored file"
         )
 
-    def test_the_backup_target_is_not_left_loose_in_the_state_directory(self):
-        runbook = RUNBOOK.read_text("utf-8")
-        section = runbook.split("## Backup", 1)[1].split("## Rollback", 1)[0]
-        # The old procedure backed up into the state dir and then *copied* it,
-        # leaving a stray database beside the live one.
-        assert "/var/lib/ai-monitor/backup-$(date" not in section
+    def test_every_backup_target_lives_in_the_backup_directory(self):
+        """The old procedure backed up into the state dir and then *copied* it,
+        leaving a stray database beside the live one. Asserting the target
+        positively catches any spelling of that regression."""
+        section = _backup_section()
+        targets = re.findall(r"\.backup '([^']+)'", section)
+        assert targets, "the procedure documents no .backup command"
+        for target in targets:
+            # The procedure may name the path directly or through a variable.
+            if target.startswith("$"):
+                name = target.lstrip("$/")
+                resolved = re.findall(rf'^{name}="([^"]+)"', section, re.M)
+                assert resolved, f"{target} is used but never assigned"
+            else:
+                resolved = [target]
+            for path in resolved:
+                assert path.startswith("/var/lib/ai-monitor/backups/"), (
+                    f"{path} is not inside the backup directory"
+                )
+
+    def test_a_second_backup_cannot_overwrite_the_first(self):
+        """.backup truncates its target silently, so the name needs a time."""
+        section = _backup_section()
+        assert re.search(r"date -u \+%FT%H%M%SZ", section), (
+            "the backup name must include the time or a same-day backup "
+            "destroys the previous one"
+        )
+
+    def test_the_backup_is_checked_before_the_sidecars_are_removed(self):
+        section = _backup_section()
+        check = section.find("integrity_check")
+        removal = section.find("rm -f /var/lib/ai-monitor/usage.db-wal")
+        assert check != -1 and removal != -1
+        assert check < removal, (
+            "a mistyped backup path should fail before the destructive rm"
+        )

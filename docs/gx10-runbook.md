@@ -3,12 +3,13 @@
 Commands for starting, upgrading, backing up, rolling back, and rotating
 credentials for the loopback usage service on the GX10 host (`zoey`).
 
-**Verification status:** the start/stop/backup/rollback commands below are
-standard `systemd` and `sqlite3` invocations, and each path is pinned to the
-layout used by `deploy/ai-monitor.service`. They have **not** yet been executed
-against a deployed unit on this host: tasks 5.2 (install under a dedicated
-account), 5.3 (Tailscale Serve), and the soak in 5.1 are still pending operator
-approval. Treat the steps as reviewed-but-unexecuted until the first install.
+**Verification status:** the backup and restore procedure has been executed end
+to end against a live service by `tools/backup_restore_check.py`, and the example
+config it installs is loaded by the test suite. Nothing else here has run against
+a deployed unit: the install, the `systemctl` lifecycle commands, and the Tailscale
+steps need `sudo` and operator approval (tasks 5.2-5.4). The soak and reset checks
+in 5.1 were run on this host without privileges. Treat everything outside the
+backup/restore procedure as reviewed-but-unexecuted until the first install.
 
 ## Layout
 
@@ -247,9 +248,12 @@ sudo install -d -m 0700 -o ai-monitor -g ai-monitor /var/lib/ai-monitor/backups
 # Online backup: safe while the service runs, because SQLite takes the locks
 # itself. Write straight into the backup directory so no second copy is left
 # loose in the state directory.
-sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
-  ".backup '/var/lib/ai-monitor/backups/usage-$(date +%F).db'"
-sudo chmod 0600 /var/lib/ai-monitor/backups/usage-$(date +%F).db
+# The timestamp includes the time: `.backup` overwrites its target silently, so
+# a second backup on the same day would destroy the first.
+BACKUP="/var/lib/ai-monitor/backups/usage-$(date -u +%FT%H%M%SZ).db"
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".backup '$BACKUP'"
+sudo chmod 0600 "$BACKUP"
+sudo -u ai-monitor sqlite3 "$BACKUP" "pragma integrity_check;"
 ```
 
 Also back up `/etc/ai-monitor/config.json` to a restricted location (it holds
@@ -260,20 +264,32 @@ Restore:
 
 ```sh
 sudo systemctl stop ai-monitor
-# If the database file itself was lost, clear stale WAL sidecars first: a
-# leftover -wal can be replayed over the restored file.
+# Check the backup before removing anything: the rm below is destructive, and a
+# mistyped path should fail here rather than after the sidecars are gone.
+RESTORE="/var/lib/ai-monitor/backups/usage-YYYY-MM-DDTHHMMSSZ.db"
+test -s "$RESTORE" || { echo "no such backup: $RESTORE"; exit 1; }
+sudo -u ai-monitor sqlite3 "$RESTORE" "pragma integrity_check;"
+# Clear stale WAL sidecars: a leftover -wal belongs to the file being replaced
+# and has no business being replayed over the restored one.
 sudo rm -f /var/lib/ai-monitor/usage.db-wal /var/lib/ai-monitor/usage.db-shm
-sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
-  ".restore '/var/lib/ai-monitor/backups/usage-YYYY-MM-DD.db'"
+sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db ".restore '$RESTORE'"
 # Confirm the restored file before starting on it.
 sudo -u ai-monitor sqlite3 /var/lib/ai-monitor/usage.db \
   "pragma integrity_check; select count(*) from observations;"
 sudo systemctl start ai-monitor
 ```
 
-`tools/backup_restore_check.py` runs these commands end to end against a live
-service in a temporary directory, so the procedure can be checked before relying
-on it on a host.
+`tools/backup_restore_check.py` runs the same procedure — including the
+`install -d`, `.backup` and `.restore` invocations above — against a live service
+in a temporary directory, so it can be checked before relying on it on a host:
+
+```sh
+PYTHONPATH=. python3 tools/backup_restore_check.py
+```
+
+It needs the `sqlite3` CLI and a working `codex`, and exits `2` when either is
+missing so a skip cannot look like a pass. The journal check above still needs
+the unit installed under systemd.
 
 ## Rollback
 

@@ -23,9 +23,11 @@ credentials. Run it from the repository root with the package importable:
 
     python3 tools/backup_restore_check.py
 
-Exit status is 0 only when every step above holds. One step cannot be reproduced
-locally: `journalctl` only knows about units installed by systemd, so the
-"no secret in the journal" check stays a deployed-host check.
+Exit status is 0 when every step above holds, 1 when a step fails, and 2 when
+the check cannot run at all (no `sqlite3` CLI, or no `codex` to collect with) —
+so a skip never looks like a pass. One step cannot be reproduced locally:
+`journalctl` only knows about units installed by systemd, so the "no secret in
+the journal" check stays a deployed-host check.
 """
 
 from __future__ import annotations
@@ -65,6 +67,18 @@ def sqlite_argv(db_path: str, dot_command: str) -> list[str]:
     return ["sqlite3", db_path, dot_command]
 
 
+def create_dir_command(path: str) -> list[str]:
+    """The documented backup-directory creation, with the caller's own ids.
+
+    The runbook names the `ai-monitor` account; an unprivileged check cannot
+    chown, so it passes its own numeric ids. This is the command that silently
+    broke — `install` refuses to create the last path component — so it is run
+    for real rather than reimplemented with `os.makedirs`.
+    """
+    return ["install", "-d", "-m", "0700", "-o", str(os.getuid()),
+            "-g", str(os.getgid()), path]
+
+
 def backup_command(db_path: str, backup_path: str) -> list[str]:
     """The documented online backup."""
     return sqlite_argv(db_path, f".backup '{backup_path}'")
@@ -76,8 +90,8 @@ def restore_command(db_path: str, backup_path: str) -> list[str]:
 
 
 def integrity_command(db_path: str) -> list[str]:
-    """The documented post-restore sanity check."""
-    return sqlite_argv(db_path, "pragma integrity_check;")
+    """The documented post-restore sanity check, both statements of it."""
+    return sqlite_argv(db_path, "pragma integrity_check; select count(*) from observations;")
 
 
 def fingerprint(db_path: str) -> Optional[list[tuple[Any, ...]]]:
@@ -88,6 +102,11 @@ def fingerprint(db_path: str) -> Optional[list[tuple[Any, ...]]]:
 
     Reads through the standard library's ``sqlite3`` rather than the service's
     own ``Database`` class, so the check does not lean on the code it is checking.
+
+    ``mode=ro`` prevents writes to the database itself, but on a WAL database it
+    can still create ``-shm``/``-wal`` sidecars in a writable directory, so this
+    is not "cannot alter what it is checking" — it does not touch the data, which
+    is what the comparison relies on.
     """
     if not os.path.exists(db_path):
         return None
@@ -110,6 +129,19 @@ def fingerprint(db_path: str) -> Optional[list[tuple[Any, ...]]]:
         return None
     finally:
         connection.close()
+
+
+def collected_at_values(db_path: str) -> set[str]:
+    """The ``collected_at`` of every stored observation.
+
+    The restarted service seeds its cache from the database, so a served
+    observation whose ``collectedAt`` is one of these came from the restore
+    rather than from a fresh poll.
+    """
+    rows = fingerprint(db_path)
+    if not rows:
+        return set()
+    return {row[2] for row in rows if row[2]}
 
 
 def compare(before: Optional[list[tuple[Any, ...]]], after: Optional[list[tuple[Any, ...]]]) -> list[str]:
@@ -137,7 +169,9 @@ def _get(url: str) -> tuple[int, dict[str, Any]]:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         return exc.code, {}
-    except urllib.error.URLError:
+    except (OSError, ValueError):
+        # URLError, a read timeout, a reset, or a truncated body: all mean the
+        # same thing to this check, and none should abort it with a traceback.
         return 0, {}
 
 
@@ -155,21 +189,30 @@ def main() -> int:
     args = parser.parse_args()
 
     if shutil.which("sqlite3") is None:
-        print("SKIP: the sqlite3 CLI is not installed, so the documented commands "
-              "cannot be run")
+        print(
+            "SKIP: the sqlite3 CLI is not installed, so the documented commands "
+            "cannot be run"
+        )
+        return 2
+    if shutil.which("codex") is None:
+        # Without it every collection fails, and the run would spend the whole
+        # timeout before reporting a failure that is really "cannot verify".
+        print(
+            "SKIP: the codex CLI is not on PATH, so there is nothing to collect "
+            "and the backup cannot be verified"
+        )
         return 2
 
     workdir = tempfile.mkdtemp(prefix="ai-monitor-backup-check-")
     state = os.path.join(workdir, "var", "lib", "ai-monitor")
     backups = os.path.join(state, "backups")
-    os.makedirs(backups, mode=0o700)
     db_path = os.path.join(state, "usage.db")
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     backup_path = os.path.join(backups, f"usage-{stamp}.db")
 
-    # The deployed layout uses a 1-hour cadence for the restart phase so a new
-    # poll cannot race the check; the first phase needs a short one.
-    config = Config(
+    # The capture phase needs a short cadence so a first collection arrives; the
+    # restart phase needs a long one so a fresh poll cannot race the check.
+    collect_config = Config(
         data_dir=state,
         api_port=0,
         codex_transport="stdio",
@@ -177,13 +220,32 @@ def main() -> int:
         antigravity_interval=600.0,
         openrouter_interval=600.0,
     )
-    db = Database(db_path)
-    worker, server = _start(config, db)
-    base = f"http://127.0.0.1:{server.port}"
 
     failures: list[str] = []
+    worker = None
+    server = None
+    db = None
     try:
+        os.makedirs(state, exist_ok=True)
         print(f"state directory: {state}")
+
+        # The documented command itself, not an equivalent: `install` is what
+        # silently failed, so it is worth actually running.
+        result = subprocess.run(
+            create_dir_command(backups), capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            failures.append(
+                f"creating the backup directory failed: {result.stderr.strip()}"
+            )
+            print(f"FAIL: {failures[-1]}")
+            return 1
+        print("backup directory created with the documented `install -d`")
+
+        db = Database(db_path)
+        worker, server = _start(collect_config, db)
+        base = f"http://127.0.0.1:{server.port}"
+
         deadline = time.monotonic() + args.timeout
         observations = 0
         while time.monotonic() < deadline:
@@ -194,16 +256,11 @@ def main() -> int:
                     break
             time.sleep(2.0)
         print(f"observations collected: {observations}")
-        if not observations:
-            failures.append(
-                f"no observation within {args.timeout:.0f}s; nothing to back up"
-            )
-
-        before = fingerprint(db_path)
-        print(f"rows captured: {len(before) if before else 0}")
 
         # --- the runbook's backup, while the service is running ---
-        result = subprocess.run(backup_command(db_path, backup_path), capture_output=True, text=True)
+        result = subprocess.run(
+            backup_command(db_path, backup_path), capture_output=True, text=True
+        )
         if result.returncode != 0:
             failures.append(f"the documented backup failed: {result.stderr.strip()}")
         elif not os.path.exists(backup_path):
@@ -212,72 +269,106 @@ def main() -> int:
             os.chmod(backup_path, 0o600)
             print(f"online backup written while running: {os.path.basename(backup_path)}")
     finally:
-        worker.stop()
-        server.shutdown()
-        db.close()
+        if worker is not None:
+            worker.stop()
+        if server is not None:
+            server.shutdown()
+        if db is not None:
+            db.close()
 
-    # --- data loss, exactly what a restore is for ---
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            os.remove(db_path + suffix)
-        except FileNotFoundError:
-            pass
-    print(f"database removed (backup kept): {not os.path.exists(db_path)}")
-
-    # --- the runbook's restore ---
-    result = subprocess.run(restore_command(db_path, backup_path), capture_output=True, text=True)
-    if result.returncode != 0:
-        failures.append(f"the documented restore failed: {result.stderr.strip()}")
-
-    integrity = subprocess.run(integrity_command(db_path), capture_output=True, text=True)
-    if integrity.returncode != 0 or "ok" not in integrity.stdout:
-        failures.append(f"integrity_check did not report ok: {integrity.stdout.strip()!r}")
-
-    failures.extend(compare(before, fingerprint(db_path)))
-
-    # --- a restart on the restored database serves the data (task 5.2) ---
-    served = 0
-    restart_config = Config(
-        data_dir=state,
-        api_port=0,
-        codex_transport="stdio",
-        codex_interval=3600.0,
-        antigravity_interval=3600.0,
-        openrouter_interval=3600.0,
-    )
-    db2 = Database(db_path)
-    worker2, server2 = _start(restart_config, db2)
     try:
-        time.sleep(1.0)
-        status, usage = _get(f"http://127.0.0.1:{server2.port}/api/v1/usage")
-        if status != 200:
-            failures.append(f"/api/v1/usage returned {status} after the restart")
-        else:
-            served = len(usage.get("observations", []))
-    finally:
-        worker2.stop()
-        server2.shutdown()
-        db2.close()
+        # The reference is the *backup file*, taken after the backup finished.
+        # Fingerprinting the live database instead would race a poll that lands
+        # between the two and fail a correct restore.
+        before = fingerprint(backup_path)
+        print(f"rows in the backup: {len(before) if before else 0}")
 
-    print(f"observations served after restore and restart: {served}")
-    if served == 0:
-        failures.append(
-            "the restarted service served no cached observation: the restore did "
-            "not survive a restart"
+        # --- data loss, exactly what a restore is for ---
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(db_path + suffix)
+            except FileNotFoundError:
+                pass
+        print(f"database removed (backup kept): {not os.path.exists(db_path)}")
+
+        # --- the runbook's restore ---
+        result = subprocess.run(
+            restore_command(db_path, backup_path), capture_output=True, text=True
         )
+        if result.returncode != 0:
+            failures.append(f"the documented restore failed: {result.stderr.strip()}")
+
+        integrity = subprocess.run(
+            integrity_command(db_path), capture_output=True, text=True
+        )
+        if integrity.returncode != 0 or "ok" not in integrity.stdout:
+            failures.append(
+                f"the documented integrity check failed (exit "
+                f"{integrity.returncode}): stdout={integrity.stdout.strip()!r} "
+                f"stderr={integrity.stderr.strip()!r}"
+            )
+
+        failures.extend(compare(before, fingerprint(db_path)))
+
+        # --- a restart on the restored database serves the data (task 5.2) ---
+        # Every source is pointed at a binary that cannot run, so nothing can be
+        # collected during this phase and the only possible source of an
+        # observation is the restored database. Without that, a *fresh* poll
+        # satisfies the check and it passes even when the restore produced
+        # nothing.
+        restored_collected_at = collected_at_values(db_path)
+        restart_config = Config(
+            data_dir=state,
+            api_port=0,
+            codex_transport="stdio",
+            codex_bin="/nonexistent/codex-for-restart-check",
+            codex_interval=3600.0,
+            antigravity_bin="/nonexistent/agy-for-restart-check",
+            antigravity_interval=3600.0,
+            openrouter_interval=3600.0,
+        )
+        db2 = Database(db_path)
+        worker2, server2 = _start(restart_config, db2)
+        served: list[str] = []
+        try:
+            time.sleep(1.0)
+            status, usage = _get(f"http://127.0.0.1:{server2.port}/api/v1/usage")
+            if status != 200:
+                failures.append(f"/api/v1/usage returned {status} after the restart")
+            else:
+                served = [
+                    entry.get("collectedAt")
+                    for entry in usage.get("observations", [])
+                ]
+        finally:
+            worker2.stop()
+            server2.shutdown()
+            db2.close()
+
+        print(f"observations served after restore and restart: {len(served)}")
+        if not served:
+            failures.append(
+                "the restarted service served no cached observation: the restore "
+                "did not survive a restart"
+            )
+        elif not set(served) & restored_collected_at:
+            failures.append(
+                f"the restarted service served {served}, which is not any of the "
+                f"restored observations: the data did not come from the restore"
+            )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
     print()
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}")
-        shutil.rmtree(workdir, ignore_errors=True)
         return 1
     print("backup and restore check complete: all expectations met")
     print(
         "not covered here: the journal redaction check (`journalctl`), which needs "
         "the unit installed under systemd"
     )
-    shutil.rmtree(workdir, ignore_errors=True)
     return 0
 
 
