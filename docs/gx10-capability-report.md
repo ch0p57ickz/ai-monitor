@@ -48,6 +48,13 @@ treat this variant as **session-data-only** (retain reported group/model/session
 scope, never invent a weekly window) and report `unavailable` until a compatible
 source exposing quota buckets is observed.
 
+Verified live through the adapter: `agy usage --json` exits 2 with
+`Error: unexpected argument "usage".`, which the adapter classifies as
+`unavailable` ("usage interface not supported by this variant"). The parser is
+capability-aware: it turns only reported buckets into windows, so a session-only
+variant never gains a fabricated weekly window, and a payload with no buckets is
+also treated as `unavailable`.
+
 ## OpenRouter endpoints
 
 The two current-key endpoints were probed **without credentials** to record error

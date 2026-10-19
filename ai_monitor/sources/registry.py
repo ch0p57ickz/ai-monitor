@@ -47,11 +47,205 @@ class UnavailableAdapter(SourceAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Antigravity (agy CLI, session-scoped)
+# Antigravity (agy CLI, version-sensitive, session-scoped)
 # ---------------------------------------------------------------------------
+
+# Scope aliases seen across Antigravity variants. Values not listed here are
+# normalized to lowercase and kept as-is, so an unverified scope is not
+# silently relabelled as one of the scopes we know.
+_ANTIGRAVITY_SCOPE_ALIASES = {
+    "session": "session",
+    "sessions": "session",
+    "conversation": "session",
+    "conversations": "session",
+    "weekly": "weekly",
+    "week": "weekly",
+    "group": "group",
+    "team": "group",
+    "org": "group",
+    "organization": "group",
+    "workspace": "group",
+    "model": "model",
+}
+
+# Markers that mean the installed variant does not expose a usage interface at
+# all. These are permanent for the install, so they map to `unavailable`.
+# Only explicit rejection phrases count: a bare usage banner can also be printed
+# by a transient crash, which must stay retryable.
+_ANTIGRAVITY_INCOMPATIBLE_MARKERS = (
+    "unknown command",
+    "unknown subcommand",
+    "unrecognized",
+    "invalid command",
+    "invalid choice",
+    "no such command",
+    "unexpected argument",
+    "unrecognized arguments",
+)
+
+_ANTIGRAVITY_BUCKET_KEYS = (
+    "buckets",
+    "quota_windows",
+    "quotaWindows",
+    "windows",
+    "quotas",
+    "usage",
+)
+
+
+def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """Return the first key present in ``mapping`` with a non-``None`` value.
+
+    Unlike an ``or`` chain, this distinguishes a reported ``0`` from a missing
+    key, which keeps "unknown" separate from a genuine zero. A key whose value
+    is explicitly ``null`` does not mask a later populated alias.
+    """
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _as_str(value: Any) -> Optional[str]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return str(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _antigravity_bucket_entries(payload: Any) -> list[Any]:
+    """Collect candidate bucket entries from an Antigravity payload.
+
+    Accepts a bare list, or a mapping with a bucket container that is either a
+    list of entries or a mapping of bucket name to entry (the name is then used
+    as a fallback scope).
+    """
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+
+    for key in _ANTIGRAVITY_BUCKET_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            return value
+        if isinstance(value, dict):
+            entries: list[Any] = []
+            for name, entry in value.items():
+                if isinstance(entry, dict):
+                    merged = dict(entry)
+                    merged.setdefault("scope", name)
+                    entries.append(merged)
+            if entries:
+                return entries
+    return []
+
+
+def parse_antigravity_usage(payload: Any) -> list[dict[str, Any]]:
+    """Map an Antigravity usage payload into quota windows.
+
+    Only buckets the payload actually reports become windows: a session-only
+    variant never gains a fabricated weekly window. Reported group, model, and
+    scope values are retained, and absent numeric fields stay ``None``.
+
+    Raises ``unavailable`` when the payload exposes no quota buckets at all,
+    which means the installed variant is not a compatible source.
+    """
+    windows: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for index, entry in enumerate(_antigravity_bucket_entries(payload)):
+        if not isinstance(entry, dict):
+            continue
+
+        raw_scope = _first_present(entry, ("scope", "kind", "type", "bucket", "window"))
+        if raw_scope is None:
+            scope = None
+        else:
+            scope = _ANTIGRAVITY_SCOPE_ALIASES.get(
+                str(raw_scope).strip().lower(), str(raw_scope).strip().lower()
+            )
+
+        group = _as_str(
+            _first_present(
+                entry, ("group", "team", "org", "organization", "workspace", "dataset")
+            )
+        )
+        model = _as_str(_first_present(entry, ("model", "model_id", "modelId")))
+        label = _as_str(_first_present(entry, ("label", "name", "title")))
+        identifier = _as_str(_first_present(entry, ("id", "key")))
+
+        parts = [scope or "bucket", group, model]
+        if label:
+            parts.append(label)
+        if not any((scope, group, model, label)):
+            parts.append(str(index))
+
+        # Windows are keyed by id downstream (history and pace tracking), so a
+        # collision would merge unrelated buckets. Tie-break on the entry index.
+        window_id = f"antigravity:{identifier or ':'.join(str(p) for p in parts if p)}"
+        if window_id in used_ids:
+            window_id = f"{window_id}#{index}"
+        used_ids.add(window_id)
+
+        windows.append(
+            {
+                "id": window_id,
+                "label": label
+                or " · ".join(str(p) for p in (scope, group, model) if p)
+                or f"bucket {index}",
+                "scope": scope,
+                "group": group,
+                "model": model,
+                "used_percent": _finite_float(
+                    _first_present(
+                        entry,
+                        (
+                            "used_percent",
+                            "usedPercent",
+                            "usagePercent",
+                            "usage_percent",
+                            "percent",
+                        ),
+                    )
+                ),
+                "remaining_percent": _finite_float(
+                    _first_present(
+                        entry,
+                        ("remaining_percent", "remainingPercent", "percentRemaining"),
+                    )
+                ),
+                "duration_minutes": _finite_float(
+                    _first_present(
+                        entry,
+                        ("duration_minutes", "durationMinutes", "window_minutes"),
+                    )
+                ),
+                "resets_at": _as_str(
+                    _first_present(entry, ("resets_at", "resetsAt", "reset_at"))
+                ),
+            }
+        )
+
+    if not windows:
+        raise CollectionError(
+            "unavailable", "antigravity variant exposes no quota buckets"
+        )
+    return windows
 
 
 class AntigravityAdapter(SourceAdapter):
+    """Collect quota buckets from the locally installed ``agy`` variant.
+
+    The interface is version-sensitive. When the installed variant has no
+    usage subcommand, or reports no quota buckets, the adapter raises
+    ``unavailable`` so the source stays visible but disabled, without
+    affecting Codex or OpenRouter.
+    """
+
     def fetch(self, config: "Config") -> dict[str, Any]:
         if not config.antigravity_bin:
             raise CollectionError("unavailable", "agy binary not found")
@@ -68,12 +262,31 @@ class AntigravityAdapter(SourceAdapter):
         except subprocess.TimeoutExpired:
             raise CollectionError("timeout", "agy usage timed out")
 
+        combined = f"{proc.stdout}\n{proc.stderr}".lower()
         if proc.returncode != 0:
-            raise CollectionError("unavailable", proc.stderr.strip()[:200])
+            if any(marker in combined for marker in _ANTIGRAVITY_INCOMPATIBLE_MARKERS):
+                raise CollectionError(
+                    "unavailable",
+                    "antigravity usage interface not supported by this variant",
+                )
+            raise CollectionError(
+                "internal",
+                f"agy usage failed (exit {proc.returncode}): {proc.stderr.strip()[:200]}",
+            )
+
+        if not proc.stdout.strip():
+            raise CollectionError("unavailable", "agy variant reports no usage data")
         try:
-            return json.loads(proc.stdout)
+            payload = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
-            raise CollectionError("unknown", f"agy output not JSON: {exc}")
+            raise CollectionError("invalid_response", f"agy output not JSON: {exc}")
+
+        windows = parse_antigravity_usage(payload)
+        return {
+            "status": "success",
+            "quota_windows": windows,
+            "notes": {"scopes": sorted({w["scope"] for w in windows if w["scope"]})},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +334,12 @@ def _openrouter_request(
         raise CollectionError("invalid_response", "openrouter returned non-JSON")
 
 
-def _usd(value: Any) -> Optional[float]:
-    """Coerce a provider USD value to a finite float, or None when absent."""
+def _finite_float(value: Any) -> Optional[float]:
+    """Coerce a reported USD amount or percentage to a finite float.
+
+    Returns ``None`` when the value is absent, non-numeric, boolean, or
+    non-finite, so callers can keep "unknown" distinct from a reported zero.
+    """
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -154,8 +371,8 @@ def parse_openrouter_account_credits(payload: Any) -> list[dict[str, Any]]:
     fabricated balance). Account and key usage are never combined.
     """
     data = _data_object(payload)
-    total = _usd(data.get("total_credits"))
-    usage = _usd(data.get("total_usage"))
+    total = _finite_float(data.get("total_credits"))
+    usage = _finite_float(data.get("total_usage"))
     remaining = total - usage if total is not None and usage is not None else None
     return [
         {
@@ -184,9 +401,9 @@ def parse_openrouter_key_usage(payload: Any) -> list[dict[str, Any]]:
             "scope": "key",
             "total_credits_usd": None,
             "total_usage_usd": None,
-            "remaining_usd": _usd(data.get("limit_remaining")),
-            "limit_usd": _usd(data.get("limit")),
-            "used_usd": _usd(data.get("usage")),
+            "remaining_usd": _finite_float(data.get("limit_remaining")),
+            "limit_usd": _finite_float(data.get("limit")),
+            "used_usd": _finite_float(data.get("usage")),
             "resets_at": None,
         }
     ]
