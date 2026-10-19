@@ -665,16 +665,25 @@ rather than assumed:
 The steps, in order:
 
 ```sh
-# 1. Define the tag in the policy file so you can apply it:
-#    "tagOwners": { "tag:zoey": ["autogroup:member"] }
+# 1. Define the tag in the policy file so you can apply it. Without this, step 2 is
+#    rejected with "requested tags are not permitted":
+#    "tagOwners": { "tag:zoey": ["papaya.ch0mp@gmail.com"] }
 
-# 2. Tag the host. Expect a re-authentication prompt.
-sudo tailscale set --advertise-tags=tag:zoey
+# 2. Tag the host. This is a `tailscale up` flag, not a `tailscale set` one:
+#    `tailscale set` has no --advertise-tags in 1.102.4 and answers
+#    "flag provided but not defined". `up` preserves settings you do not mention,
+#    and this host has no advertised routes, exit node, or Tailscale SSH to lose.
+#    Tagging changes the node's ownership, so expect a re-authentication URL;
+#    complete it in a browser signed in as the tag owner. If the tag does not
+#    apply, repeat with --force-reauth.
+sudo tailscale up --advertise-tags=tag:zoey
 tailscale status --json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["Tags"])'
 
 # 3. Define the Service in the admin console (Services page): name it and give it
-#    the endpoint tcp:443. This needs Owner, Admin, or Network admin.
+#    the endpoint tcp:443. This needs Owner, Admin, or Network admin. To skip the
+#    manual approval in step 4, add an auto-approver in the same policy file:
+#    "autoApprovers": { "services": { "svc:ai-monitor": ["tag:zoey"] } }
 
 # 4. Advertise it from zoey, then approve the host in the console — or add an
 #    autoApprovers.services rule to pre-approve it.

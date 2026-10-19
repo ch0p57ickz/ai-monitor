@@ -182,3 +182,21 @@ def test_the_tests_and_the_host_alias_agree(policy, zoey_ip):
             for entry in case.get(key, []):
                 host, _ = _split(entry)
                 assert host == zoey_ip, f"{entry} does not name the aliased host"
+
+
+def test_the_runbook_uses_a_flag_the_installed_cli_accepts():
+    """``tailscale set`` has no ``--advertise-tags``, and says so.
+
+    Verified on this host with Tailscale 1.102.4:
+
+        $ sudo tailscale set --advertise-tags=tag:zoey
+        flag provided but not defined: -advertise-tags
+
+    ``tailscale up`` is the command that takes it. The runbook said ``set``, which
+    cost a round trip; this keeps the wrong form from coming back.
+    """
+    runbook = (POLICY.parent.parent / "docs" / "gx10-runbook.md").read_text("utf-8")
+    assert "tailscale up --advertise-tags=" in runbook
+    assert "tailscale set --advertise-tags" not in runbook
+    # The tag has to exist before it can be applied, or the command is rejected.
+    assert "tagOwners" in runbook
