@@ -315,12 +315,27 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Node and domain | `zoey` (`100.108.85.109`), `zoey.tail831c33.ts.net` |
 | Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
 | Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync` — which are not granted access to user devices |
+| Node ownership | User-owned, untagged (`tailscale status --json` shows no `Tags`, no advertised services) |
+| Service alternative | Not available without re-tagging `zoey`, which changes how the node authenticates and drops the `Tailscale-User-Login` header that Serve injects for user devices only |
 | Plan | Publish the service port (bound to `127.0.0.1`) via `tailscale serve`, restrict with tailnet identity/device rules for the intended Mac and iPhone, Funnel stays disabled |
 
 Serve access control is the tailnet policy file, which is deny-by-default and not
 visible from the CLI, so the access rules themselves remain unverified. The
 survey, `tailscale serve status`, and `tailscale funnel status` all ran without
 privileges; `tailscale serve` itself does not.
+
+The denied-device half of 5.3 is the part at risk, and not for a mechanical
+reason. A route on a node is a *device* endpoint, governed by the device rules in
+the policy file — which is why this tailnet moved its agent dashboards to
+Tailscale Services, after finding that a device route on `ranger` stayed reachable
+by anyone the device rules already allowed. Here the spec requires Serve, and a
+Service host must be a tagged device, which `zoey` is not. So the restriction has
+to come from narrowing the device rules for `zoey:443`, and two things follow that
+no CLI command can check: whether the current policy already allows the intended
+devices (or every member device) to reach `zoey`, in which case adding a grant
+narrows nothing because rules union; and whether narrowing stays port-specific, so
+that `zoey`'s four other routes keep working. See the runbook for the options if
+it cannot be narrowed cleanly.
 
 ## Verification results (local, 2026-10-19)
 

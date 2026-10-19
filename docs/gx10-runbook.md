@@ -466,6 +466,37 @@ and the four existing Serve mappings suggest the intended devices already reach
 this node on other ports. Confirming which rule governs the new port is part of
 the task, not a step that can be skipped.
 
+### Why the denied-device check is the hard half
+
+A route on a node is a *device* endpoint: its access is governed by the device
+rules in the policy file, not by anything `tailscale serve` sets. This tailnet
+already learned that the hard way — the agent dashboards were moved to Tailscale
+**Services** because a device route on `ranger` stayed reachable by anyone the
+device rules already allowed, so the per-service grant restricted nothing. That
+precedent does not transfer directly here:
+
+- The spec requires Serve, not a Service.
+- A Service host must be a tagged device. `zoey` is user-owned and untagged
+  (`tailscale status --json` shows no `Tags` and no advertised services), and
+  tagging it would change how the node authenticates and drop the
+  `Tailscale-User-Login` header, which Serve injects for user devices only.
+  Re-tagging a host that already serves four routes is not a small change.
+
+So the restriction has to come from the device rules, which leaves two things the
+CLI cannot check:
+
+1. Whether the current policy already lets the intended devices — or *every*
+   member device — reach `zoey`. If it does, adding a grant for `tcp:443` narrows
+   nothing, because rules union rather than override.
+2. Whether narrowing stays port-specific. `zoey` serves four other routes (3773,
+   8443, 8444, 8445), so a rule that narrows `zoey` as a whole rather than
+   `zoey:443` breaks them.
+
+If the policy cannot be narrowed to `zoey:443` for the intended devices without
+that collateral, the honest options are to accept the wider exposure, or to
+revisit whether this endpoint should be a Service on a tagged host — which changes
+the spec, not the runbook.
+
 ### Acceptance checks (operator present)
 
 1. **Intended client — macOS.** From `jamess-macbook-pro`, open
