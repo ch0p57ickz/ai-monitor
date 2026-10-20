@@ -2,14 +2,21 @@
 
 ``deploy/config.example.json`` is not documentation: the install step copies it to
 ``/etc/ai-monitor/config.json`` verbatim, so every value in it becomes the running
-service's value. Nothing in the suite loaded it until now, which meant it could
-drift from the unit and from the port Serve proxies without a test noticing. The
-service would still start — on the wrong directory, or behind the wrong port, where
-the only symptom is an obscure startup failure or a 502 that looks like a provider
-outage.
+service's value.
 
-Each guard below pairs the example with the thing it has to agree with: the loader,
-the unit, the Runbook's install step, and the Runbook's Serve command.
+``tests/test_backup_restore_check.py`` already loads it through ``Config(**json)``
+and checks loopback, the transport, the empty credentials, and that every field is
+present. That constructor does not validate values, and it cannot compare the file
+against the unit. The tests here cover the four things that span two files which are
+edited independently:
+
+- the file survives the **validating** loader the service actually runs;
+- it differs from the loader's defaults only in the three deployment paths;
+- its state directory is the one ``ProtectSystem=strict`` grants the unit;
+- its port is the one Serve proxies to, at the path the unit reads.
+
+A drift in any of these starts a service that looks healthy and answers nothing
+useful, which is why none of them is left to review.
 """
 
 from __future__ import annotations
@@ -80,13 +87,30 @@ def _directive_texts(text: str, directive: str) -> list[str]:
     return texts
 
 
-def test_the_example_loads_and_binds_loopback():
-    """The real loader, not a bare ``json.load``.
+def _shell_blocks(text: str) -> list[str]:
+    """The contents of every fenced block, without the fences."""
+    blocks: list[str] = []
+    current: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            if inside:
+                blocks.append("\n".join(current))
+                current = []
+            inside = not inside
+            continue
+        if inside:
+            current.append(line)
+    return blocks
 
-    The loader rejects unknown keys and non-loopback hosts, so loading here also
-    proves the file has neither. A ``0.0.0.0`` in the example would not expose the
-    API — startup would fail — but the operator would meet it as a confusing config
-    error at the worst moment.
+
+def test_the_example_loads_through_the_validating_loader():
+    """``Config(**json)`` skips validation; this is the loader the service runs.
+
+    It rejects unknown keys and range-checks every value, so loading here fails for
+    the reasons ``systemctl start`` would fail. It also carries the two values the
+    deployment depends on: loopback binding, which the loader refuses to relax, and
+    the port Serve proxies to.
     """
     config = load_config(EXAMPLE)
     assert config.api_host == "127.0.0.1"
@@ -97,30 +121,27 @@ def test_the_example_differs_from_the_defaults_only_in_deployment_paths():
     """Anything else that differs is a decision that should be recorded here.
 
     The spec fixes the intervals, bounds, and the response cap, and
-    ``tests/test_config.py`` holds the loader's defaults to it. This asserts the
-    file the operator installs is that same configuration, so an edit to one and not
-    the other fails rather than shipping a different posture than the tests checked.
+    ``tests/test_config.py`` holds the loader's defaults to it. This asserts the file
+    the operator installs is that same configuration, so an edit to one and not the
+    other fails rather than shipping a posture the tests never checked.
+
+    Field *names* are compared, not values: a credential accidentally committed to
+    the example must not be echoed into test output.
     """
     example = load_config(EXAMPLE)
     defaults = Config()
     differing = {
-        field.name: getattr(example, field.name)
+        field.name
         for field in dataclasses.fields(Config)
         if getattr(example, field.name) != getattr(defaults, field.name)
     }
-    assert differing == DEPLOYMENT_PATHS
-
-
-def test_the_example_carries_no_credentials():
-    """It is committed, so anything in it is in every install and every clone.
-
-    The install step copies the file as-is; leaving a real key here would put it on
-    the deployed host at 0640 root:ai-monitor and in git history at once.
-    """
-    config = load_config(EXAMPLE)
-    assert config.openrouter_api_key == ""
-    assert config.openrouter_management_key == ""
-    assert config.account_digest_key == ""
+    unexpected = differing ^ set(DEPLOYMENT_PATHS)
+    assert not unexpected, (
+        "the example must be the loader's defaults plus the deployment paths; "
+        f"these fields differ unexpectedly: {sorted(unexpected)}"
+    )
+    for name, expected in DEPLOYMENT_PATHS.items():
+        assert getattr(example, name) == expected, f"{name} should be {expected!r}"
 
 
 def test_the_state_directory_is_the_one_the_unit_grants(unit_text):
@@ -128,57 +149,84 @@ def test_the_state_directory_is_the_one_the_unit_grants(unit_text):
 
     A ``data_dir`` outside ``ReadWritePaths`` fails at startup with a permission
     error that names the database, not the unit line that caused it. The unit also
-    pins the same value through ``AI_MONITOR_DATA_DIR``, so both have to agree with
-    the file.
+    pins the same value through ``AI_MONITOR_DATA_DIR``, and
+    ``tests/test_deploy_unit.py`` holds that to the literal this dict names.
     """
     data_dir = load_config(EXAMPLE).data_dir
-    assert data_dir in _directive_values(unit_text, "ReadWritePaths")
-    assert f"AI_MONITOR_DATA_DIR={data_dir}" in _directive_values(
-        unit_text, "Environment"
+    writable = _directive_values(unit_text, "ReadWritePaths")
+    assert data_dir in writable, (
+        f"{data_dir} must be one of the unit's ReadWritePaths, or "
+        f"ProtectSystem=strict makes the database unwritable; the unit grants "
+        f"{writable}"
     )
 
 
 def test_the_unit_reads_the_config_the_install_writes(unit_text, runbook_text):
-    """One path, named in three places that are edited independently."""
+    """One path, named in three places that are edited independently.
+
+    Only ``ExecStart`` is parsed; an ``ExecStartPre`` that also named a config would
+    not be covered here.
+    """
     exec_start = _directive_texts(unit_text, "ExecStart")
     assert len(exec_start) == 1, "the unit should have exactly one ExecStart"
     args = exec_start[0].split()
-    assert "--config" in args, "the unit must pass its config path explicitly"
-    installed = args[args.index("--config") + 1]
-    assert installed == CONFIG_PATH
-    assert f"deploy/config.example.json {CONFIG_PATH}" in runbook_text, (
-        "the runbook's install step must write the path the unit reads"
+    installed = None
+    for index, arg in enumerate(args):
+        if arg == "--config" and index + 1 < len(args):
+            installed = args[index + 1]
+        elif arg.startswith("--config="):
+            installed = arg.split("=", 1)[1]
+    assert installed == CONFIG_PATH, (
+        f"the unit must pass its config path explicitly; it passes {installed!r}"
+    )
+
+    # Join continuations first: the install command may be wrapped, and a wrapped
+    # command would otherwise look like a block with no install line in it.
+    blocks = [
+        block
+        for block in _shell_blocks(runbook_text.replace("\\\n", " "))
+        if any(
+            line.strip().startswith("sudo install") and "config.example.json" in line
+            for line in block.splitlines()
+        )
+    ]
+    assert len(blocks) == 1, (
+        f"the runbook should install the example in exactly one step: {len(blocks)}"
+    )
+    install = next(
+        line.strip()
+        for line in blocks[0].splitlines()
+        if "config.example.json" in line and line.strip().startswith("sudo install")
+    )
+    assert install.split()[-1] == CONFIG_PATH, (
+        f"the install step must write the path the unit reads ({CONFIG_PATH}): "
+        f"{install}"
     )
 
 
 def test_the_example_port_is_the_one_serve_proxies(runbook_text):
-    """A drift here is invisible until a client gets a 502.
+    """A drift here is invisible until the widget has no data.
 
-    Serve keeps answering, the journal shows a healthy service, and the only
-    symptom is that the widget has no data.
+    Serve keeps answering, the journal shows a healthy service, and the only symptom
+    is a request that reaches nothing. The scan is limited to this service's own
+    commands — the runbook also documents routes for other services — and tolerates
+    a wrapped command, since the runbook wraps long lines.
     """
-    proxied = set(
-        re.findall(
-            r"tailscale serve [^\n]*?127\.0\.0\.1:(\d+)",
-            runbook_text,
-        )
+    lines = runbook_text.replace("\\\n", " ").splitlines()
+    commands = [
+        f"{line} {following}"
+        for line, following in zip(lines, lines[1:])
+        if "tailscale serve" in line
+        and ("svc:ai-monitor" in line or "--https=443" in line)
+    ]
+    assert len(commands) >= 2, (
+        "the runbook should document the deployed and fallback Serve commands; "
+        f"found {len(commands)}"
     )
-    assert proxied, "no Serve command proxies to a literal loopback port"
+    proxied: set[str] = set()
+    for command in commands:
+        proxied.update(re.findall(r"127\.0\.0\.1:(\d+)", command))
     assert proxied == {str(load_config(EXAMPLE).api_port)}, (
         f"Serve proxies to {sorted(proxied)}; the example listens on "
         f"{load_config(EXAMPLE).api_port}"
-    )
-
-
-def test_the_example_uses_the_transport_the_deployment_can_run(unit_text):
-    """stdio is deliberate; the socket route is closed on this host.
-
-    AppArmor blocks ``bubblewrap`` here, so the daemon the socket belongs to cannot
-    start. The unit sets no transport override, which makes the config file the only
-    place this is decided — and the only place a future edit would change it.
-    """
-    assert load_config(EXAMPLE).codex_transport == "stdio"
-    overrides = _directive_values(unit_text, "Environment")
-    assert not any("TRANSPORT" in value for value in overrides), (
-        "the unit must not shadow the configured transport"
     )

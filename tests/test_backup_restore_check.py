@@ -159,10 +159,11 @@ class TestExampleConfigLoads:
         assert config.codex_transport == "stdio"
 
     def test_no_credential_is_prefilled(self):
+        """Compare lengths, not values: a leaked key must not be echoed by pytest."""
         data = json.loads(EXAMPLE_CONFIG.read_text("utf-8"))
-        assert data["openrouter_api_key"] == ""
-        assert data["openrouter_management_key"] == ""
-        assert data["account_digest_key"] == ""
+        assert len(data["openrouter_api_key"]) == 0
+        assert len(data["openrouter_management_key"]) == 0
+        assert len(data["account_digest_key"]) == 0
 
     def test_the_paths_it_names_are_the_documented_layout(self):
         data = json.loads(EXAMPLE_CONFIG.read_text("utf-8"))

@@ -933,7 +933,11 @@ identity and VIPs are readable from `zoey`, without the console.
 1. **The Service answers at all.** Start the service first (task 5.2) — until it
    runs, nothing listens on `8732`, so the Service has no backend and this check
    cannot pass. Then confirm the API locally:
-   `curl -s http://127.0.0.1:8732/api/v1/version`.
+   `curl -s http://127.0.0.1:8732/api/v1/version`. The two failure shapes differ
+   and are easy to misread: a device route whose backend is down answers `502`
+   (that is what `3773` does today), while a Service with no backend fails before
+   HTTP — `curl` exits `35` with `%{http_code}` `000` in under a second. A `000`
+   here is a missing backend, not a certificate problem.
 2. **Intended client — macOS.** From `jamess-macbook-pro`, open
    `https://ai-monitor.tail831c33.ts.net/api/v1/version` and confirm the version
    JSON. The Service DNS name is the address, not `zoey.tail831c33.ts.net`: port
