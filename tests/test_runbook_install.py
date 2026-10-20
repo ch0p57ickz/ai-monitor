@@ -105,7 +105,10 @@ def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
         for line in block.splitlines()
         if line.strip()
         and not line.strip().startswith("#")
-        and "git" in line
+        # `git` as its own token: a path like `/opt/ai-monitor/.gitignore` is not an
+        # invocation, and matching the substring made this guard fire on the prune
+        # step that removes it.
+        and "git" in line.split()
         and "/opt/ai-monitor" in line
     ]
     # The upgrade and the rollback each document the git form, two commands each.
@@ -122,6 +125,65 @@ def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
             f"a root-run git inside an ai-monitor-owned tree needs "
             f"safe.directory: {command}"
         )
+
+
+def test_the_prune_step_never_removes_what_the_install_copies():
+    """`--exclude '*'` protects leftovers from `--delete`, so the runbook prunes.
+
+    Observed on this host: the deployed tree still carries `tests/`, `openspec/`,
+    `.opencode/`, `.agents/`, `.gitignore`, and `.pytest_cache/` from the copy made
+    before the allowlist landed, because an excluded path survives `--delete`. So no
+    install or upgrade removes them, and a stale `tests/` makes the tree lie about
+    what is deployed.
+
+    The prune is an `rm -rf` against the tree that also holds the deployment, so the
+    failure worth guarding is a target the install itself put there.
+    """
+    text = RUNBOOK.read_text("utf-8")
+    copied = set()
+    for line in text.splitlines():
+        if "--include" in line:
+            copied.update(re.findall(r"--include '/([^/']+)", line))
+    assert copied == {
+        "ai_monitor",
+        "deploy",
+        "docs",
+        "tools",
+        "pyproject.toml",
+    }, f"the install copies {sorted(copied)}"
+
+    targets: set[str] = set()
+    for block in _shell_blocks(text.replace("\\\n", " ")):
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("sudo rm -rf"):
+                continue
+            if "/opt/ai-monitor" not in stripped:
+                continue
+            targets.update(
+                token.removeprefix("/opt/ai-monitor/")
+                for token in stripped.split()
+                if token.startswith("/opt/ai-monitor/")
+            )
+
+    assert targets, "the runbook should prune what an upgrade cannot remove"
+    forbidden = targets & (copied | {"venv"})
+    assert not forbidden, (
+        f"the prune must not remove deployed content or the virtualenv: "
+        f"{sorted(forbidden)}"
+    )
+    leftovers = {
+        "tests",
+        "openspec",
+        ".opencode",
+        ".agents",
+        ".gitignore",
+        ".pytest_cache",
+    }
+    assert leftovers <= targets, (
+        f"the prune should name the leftovers seen on this host; missing "
+        f"{sorted(leftovers - targets)}"
+    )
 
 
 def test_every_in_tree_build_clears_the_stale_build_directory():

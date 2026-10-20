@@ -254,11 +254,30 @@ sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree: ok"
 
 # Any line missing above means fixing that thing before starting. A tree copied
 # without the step 2 allowlist also carries `.gitignore`, `tests/`, `openspec/`,
-# `build/`, and `.pytest_cache/`; none belong here. `.env` is the one that matters:
-# this repository keeps it at mode 0664 under a world-traversable /opt, so remove it
-# from the deployment tree even if the check above passed, and confirm it is gone.
+# `.opencode/`, `.agents/`, `build/`, and `.pytest_cache/`; none belong here. `.env`
+# is the one that matters: this repository keeps it at mode 0664 under a
+# world-traversable /opt, so remove it from the deployment tree even if the check
+# above passed, and confirm it is gone.
 sudo rm -f /opt/ai-monitor/.env
 sudo test ! -e /opt/ai-monitor/.env && echo "gone"
+
+# The rest do not come back, and they do not go away either. `--exclude '*'`
+# protects excluded paths from `--delete`, so no later install or upgrade removes
+# what an earlier non-allowlist copy left. Observed on this host: the deployed tree
+# still carries `tests/`, `openspec/`, `.opencode/`, `.agents/`, `.gitignore`, and
+# `.pytest_cache/` from the copy made before the allowlist landed (commit 73a777a,
+# 2026-10-19 15:52). They are inert — the service imports the copy in
+# `venv/lib/python3.12/site-packages`, and no `.pth` links back into this tree — but
+# a stale `tests/` makes the tree lie about what is deployed, and anything copied in
+# is at the same mode as `/opt`. Prune them once, deliberately. A fresh install has
+# nothing to remove and these paths do not exist.
+sudo rm -rf /opt/ai-monitor/tests /opt/ai-monitor/openspec \
+  /opt/ai-monitor/.opencode /opt/ai-monitor/.agents \
+  /opt/ai-monitor/.gitignore /opt/ai-monitor/.pytest_cache
+# What is left should be the allowlist plus the two in-tree build artifacts:
+# `ai_monitor/`, `deploy/`, `docs/`, `tools/`, `pyproject.toml`, `venv/`, `build/`,
+# `ai_monitor.egg-info/`.
+ls -A /opt/ai-monitor
 
 sudo systemctl enable --now ai-monitor
 
@@ -459,6 +478,10 @@ upgrade is reverted by checking out the previous revision and repeating the
 
 Reverting is the same steps with an earlier revision — see Rollback for the two
 layouts and the version check that confirms the install took.
+
+**A tree created before the allowlist landed carries leftovers no upgrade removes**,
+because `--exclude '*'` protects excluded paths from `--delete`. The Install step
+prunes them once; nothing here does.
 
 ## Backup
 
