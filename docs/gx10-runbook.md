@@ -11,9 +11,14 @@ live service by `tools/backup_restore_check.py`, and the restart check has now b
 for real — `tools/restart_check.py` passed at 18:58:18 PDT after the operator restored
 the OpenRouter key the previous restart had come back without.
 
-Still reviewed-but-unexecuted on the deployed host: the **Tailscale device checks**
-(`5.3`, which need the operator's devices) and the root commands for **upgrade, backup,
-rollback, and credential rotation** (`5.4`).
+Executed on the deployed host since: the **upgrade** sequence at 19:11:51 PDT, after which
+every runtime file in `/opt/ai-monitor` hashed identically to this checkout; the
+**backup** (`.backup` plus `pragma integrity_check`, returning `ok`); and **credential
+rotation** (the OpenRouter key replaced and the sources confirmed healthy). Not run end
+to end: the **rollback**'s revision-selection step — its copy, install, and restart half
+is the upgrade sequence just verified, and the pip-level rollback was rehearsed in a
+temporary venv. The **Tailscale device checks** (`5.3`) were waived by the operator on
+2026-10-20, so the grant's denial is unproven.
 
 ## Layout
 

@@ -597,8 +597,32 @@ install from a copy of the checkout, and run the console script the unit runs.
 | Rollback (back to 0.1.0, reinstall) | Pass — all three report 0.1.0 |
 | Offline: `pip wheel` then install the wheel into a clean venv | Pass — installs and runs with no index and no setuptools on the target |
 
-What is *not* covered: systemd starting the unit, the unit's sandbox, and the
-service account's own provider sign-in. Those need the host.
+What is *not* covered here: systemd starting the unit, the unit's sandbox, and the
+service account's own provider sign-in. Those need the host, and they ran — see below.
+
+### The deployed tree ran the upgrade and the backup (2026-10-19 19:11 PDT)
+
+The operator ran both root sequences against `/opt/ai-monitor`.
+
+**Upgrade** — `rsync` with the allowlist, `chown`, the `.env` check, `rm -rf build/`,
+`pip install` as the service account, restart. `pip` reported
+`Successfully installed ai-monitor-0.1.0`; the console script and the API both reported
+`0.1.0`. After the restart, every runtime file in the deployed tree hashed identically to
+this checkout — all of `ai_monitor/*.py`, `tools/restart_check.py`,
+`deploy/ai-monitor.service`, and `pyproject.toml` — so the allowlist copy and the
+service-account install put the revision in place and the deployed copy is no longer
+stale. `/health` returned `codex` and both OpenRouter sources healthy, and 82 of the 85
+history rows predated the restart, the oldest still the first collection at 18:15:34, so
+the upgrade restart is a fourth data-preservation pass.
+
+**Backup** — `install -d` for the target, the online `.backup`, `chmod 0600`, and
+`pragma integrity_check`, which returned `ok` on the file produced.
+
+Still unrun: the rollback's revision-selection step, checking out an earlier SHA in the
+operator's checkout. Its copy, install, and restart half is the upgrade sequence above,
+and the pip-level rollback was rehearsed in a temporary venv, so only the SHA selection
+is unexercised; running it means downgrading the live service, which is why it was not
+done for its own sake.
 
 ### Finding: the install needs network, or a prebuilt wheel
 
