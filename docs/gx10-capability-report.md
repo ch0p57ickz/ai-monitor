@@ -758,6 +758,70 @@ until the journal was read, so the runbook has one precondition block before
 as the service account deliberately: `sudo test -r` runs as root and passes no matter
 what the service will actually see.
 
+## Third attempt: the service is running (2026-10-19 18:15 PDT)
+
+The config was written and the service started. Verified from the host,
+unprivileged, at 18:17 PDT (01:17 UTC):
+
+| Check | Result |
+| --- | --- |
+| Unit state | `active`, started 18:15:34 PDT, listening on `127.0.0.1:8732` |
+| `/health` | HTTP 200, `serviceStatus` `degraded`: `codex` healthy, `openrouter-account` healthy, `openrouter-key` healthy, `antigravity` `unavailable` |
+| `/api/v1/version` | `{"api_version": "1", "service_version": "0.1.0"}` |
+| `/api/v1/usage` | 1909 bytes, three observations, all `fresh`, each `collectedAt` from the current poll |
+| `/api/v1/usage/history?hours=168&limit=500` | 2789 bytes, 4 rows, `truncated: false` — far inside the 256 KiB cap |
+| Journal scan | 0 occurrences of `sk-`, `sk-or-`, `Bearer`, `api_key`, `password`, or the login name; 0 `[redacted]` and 0 `***` markers, so nothing secret-shaped was logged and nothing needed masking |
+| Response scan | the same patterns over `/health`, `/api/v1/usage`, and the history response: 0 |
+| `.env` | gone from the deployed tree |
+
+`degraded` is the specified value, not a fault: the spec makes `serviceStatus`
+`healthy` only when every source is healthy and requires HTTP 200 for degraded state.
+`antigravity` is `unavailable` here by design, because `agy` 1.4.2 has no `usage`
+subcommand, and it does not affect the other three.
+
+**Both OpenRouter streams are healthy**, which is the first time the real credential
+path has run in the deployment: the operator set `openrouter_api_key`, so
+`openrouter-key` collects from `/api/v1/key` instead of reporting `not_configured`.
+
+**`account_digest_key` is not set.** The startup warning says so —
+
+```text
+WARNING ai_monitor.state: account_digest_key is not set: provider account ids
+will be null and account-scoped trends are disabled
+```
+
+— and the payloads carry `accountId: null`, the specified behaviour rather than an
+inferred identity. Setting it now is the cheap moment: no stored row holds a derived
+id yet, so nothing is detached. After that it should not change, because every id is
+derived from it.
+
+### Finding: the Service answers, and the host is not the grant
+
+`https://ai-monitor.tail831c33.ts.net/health` and `/api/v1/version` answer `200` from
+`zoey` in about 0.2 s, so the Service, the TLS name, and the backend all work
+end to end.
+
+That is not evidence of the access rule. The grant's source list is the ten operator
+device addresses, IPv4 and IPv6 — `jamess-macbook-pro`, `aerith`, `aloy`,
+`pineapple`, `moltbot`, and five iOS nodes — with **no tag and no `zoey`**, and
+`zoey` reaches the VIP anyway. A host reaching its own VIP does not traverse the
+ingress rule, so a success here says nothing about a remote peer.
+
+It also does not settle the denial, because the filter is permissive toward the VIP:
+the allow-all rule's destination is `IP: "*"`, which parses to `0.0.0.0/0` and `::/0`.
+Whether an ungranted peer is stopped by access-controlled routing is the open
+question, and only a request from a `tag:agent` node answers it. **If that request
+returns data, the Service path does not meet task 5.3's denial requirement and the
+node-route form — narrowing the device rules for the served port — is the fallback.**
+
+**The restart check is still outstanding.** 5.2 asks for a restart that preserves
+cached data, and none has happened since collection began: the process start
+(18:15:34) and the oldest stored row (18:15:34) are the same second, so there is no
+evidence either way. `systemctl restart` needs interactive authentication on this
+host, so the operator runs it. The check is a comparison, not a glance: record the
+served `collectedAt` values, restart, then confirm the history still carries those
+exact timestamps. A fresh poll would satisfy a glance without proving anything.
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |

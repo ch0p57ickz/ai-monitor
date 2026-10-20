@@ -977,11 +977,17 @@ identity and VIPs are readable from `zoey`, without the console.
 3. **Intended client — iPhone.** From `iphone182-2`, open
    `https://ai-monitor.tail831c33.ts.net/health`.
 4. **Denied device.** From a `tag:agent` service node such as `rumi`, `happier`, or
-   `mira` — the natural choice, since those belong to the separate
-   `tagged-devices` identity and the grant admits the operator's devices only —
-   confirm the Service URL fails rather than returning usage data, and that
-   `https://zoey.tail831c33.ts.net:8443/` still answers. This check is what the
-   packet filter predicts; the device run is what proves it.
+   `mira` — they belong to the separate `tagged-devices` identity, and the grant
+   admits the operator's ten devices and no tag — confirm the Service URL fails
+   rather than returning usage data, and that `https://zoey.tail831c33.ts.net:8443/`
+   still answers. **Run this from another device, not from `zoey`.** `zoey` is not in
+   the grant — the rule's sources are the ten operator device addresses, IPv4 and
+   IPv6, with no tag — yet `curl https://ai-monitor.tail831c33.ts.net/health` on
+   `zoey` answers `200`, which is the host reaching its own VIP and therefore not a
+   test of the rule. The packet filter does not predict the result either, since its
+   allow-all rule matches the VIP, so this device run is the only evidence. If a
+   `tag:agent` node gets data, the Service path does not meet the requirement and the
+   node-route form above is the fallback.
 5. **Funnel stays off.** `tailscale funnel status` must keep showing
    `(tailnet only)` for every mapping, including the Service.
 
