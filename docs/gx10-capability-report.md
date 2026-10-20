@@ -328,6 +328,27 @@ produces a tree that installs, `pip show` and `--version` follow the tree throug
 a version bump and back, and a code-only change with the version unchanged also
 reinstalls, because pip uninstalls the old copy first.
 
+### Finding: the offline wheel command cannot run as the operator
+
+The documented offline path built the wheel with
+
+```sh
+python3 -m pip wheel --no-build-isolation -w /tmp/ai-monitor-wheel /opt/ai-monitor
+```
+
+Run as the operator on this host, it fails:
+
+```text
+error: Cannot update time stamp of directory 'ai_monitor.egg-info'
+ERROR: Failed building wheel for ai-monitor
+```
+
+`/opt/ai-monitor` is `0775 ai-monitor:ai-monitor`, so the operator cannot write
+it, and setuptools writes `build/` and `ai_monitor.egg-info/` into the source tree
+while building. Every other in-tree build in the runbook already runs as the
+service account; this one did not. It now runs as the service account and clears
+`build/` first, and the guard covers it alongside the three install steps.
+
 ### Finding: the rollback command cannot run on the deployed layout
 
 The rollback step ran `sudo -u ai-monitor git -C /opt/ai-monitor checkout

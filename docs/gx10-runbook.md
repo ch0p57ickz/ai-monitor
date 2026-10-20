@@ -303,9 +303,21 @@ wheel builds nothing, so the service host needs neither setuptools nor an index:
 # interpreter's setuptools rather than downloading one, so it works offline; on a
 # host with network access you can omit the flag instead. Write the wheel outside
 # the checkout, or `dist/` appears as an untracked directory in /opt/ai-monitor.
-python3 -m pip wheel --no-build-isolation -w /tmp/ai-monitor-wheel /opt/ai-monitor
+#
+# Build as the account that owns the tree, and clear `build/` first. Verified on
+# this host: run as the operator, this command fails with
+#
+#   error: Cannot update time stamp of directory 'ai_monitor.egg-info'
+#
+# because /opt/ai-monitor is 0775 ai-monitor:ai-monitor and setuptools writes into
+# the source tree. The same `build/` reuse as in the upgrade applies here too, so
+# the stale artifacts go first.
+sudo rm -rf /opt/ai-monitor/build
+sudo -u ai-monitor python3 -m pip wheel --no-build-isolation \
+  -w /tmp/ai-monitor-wheel /opt/ai-monitor
 
-# Copy it to the service host, then install into the clean venv:
+# If the wheel was built on another host, copy it over first. Then install it into
+# the clean venv:
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install --no-index /tmp/ai-monitor-wheel/ai_monitor-*.whl
 sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 ```

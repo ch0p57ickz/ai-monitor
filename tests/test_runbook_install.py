@@ -119,29 +119,38 @@ def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
         )
 
 
-def test_every_in_tree_install_clears_the_stale_build_directory():
-    """`pip install <dir>` reuses the `build/` it leaves, so deletions survive.
+def test_every_in_tree_build_clears_the_stale_build_directory():
+    """`pip install <dir>` and `pip wheel <dir>` reuse the `build/` they leave.
 
     Verified on this host: install a tree, add a module, install again, delete the
-    module from the tree, then reinstall — the module was still installed, because
-    setuptools had kept it in `build/lib/`. The rsync cannot clear it either, since
-    excluded paths survive `--delete`. So every in-tree install clears `build/`
-    first: the install step, the upgrade step, and the rollback's git form.
+    module from the tree, then reinstall — the module was still installed, and a
+    wheel built from that tree contained it, because setuptools had kept it in
+    `build/lib/`. The rsync cannot clear it either, since excluded paths survive
+    `--delete`. So every step that builds from the tree clears `build/` first: the
+    install, the upgrade, the rollback's git form, and the offline wheel build.
     """
-    installing = [
+    building = [
         block
         for block in _shell_blocks(RUNBOOK.read_text("utf-8"))
-        if "pip install /opt/ai-monitor" in block
+        if "pip install /opt/ai-monitor" in block or "pip wheel" in block
     ]
-    assert len(installing) == 3, (
-        f"install, upgrade and rollback should each install in-tree: {len(installing)}"
+    assert len(building) == 4, (
+        f"install, upgrade, rollback and the wheel build each build in-tree: "
+        f"{len(building)}"
     )
-    for block in installing:
+    for block in building:
+        first_build = min(
+            index
+            for index in (
+                block.find("pip install /opt/ai-monitor"),
+                block.find("pip wheel"),
+            )
+            if index != -1
+        )
         cleared = block.find("rm -rf /opt/ai-monitor/build")
-        installed = block.find("pip install /opt/ai-monitor")
-        assert 0 <= cleared < installed, (
-            "an in-tree install must clear build/ first, or a module the previous "
-            "revision deleted stays packaged:\n" + block
+        assert 0 <= cleared < first_build, (
+            "a build from the tree must clear build/ first, or a module the "
+            "previous revision deleted stays packaged:\n" + block
         )
 
 
