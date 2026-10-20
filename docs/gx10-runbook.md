@@ -626,9 +626,11 @@ Observed:
 | Service VIP | `100.76.182.227` (`fd7a:115c:a1e0::6528:b6e4`), from `SelfNode.CapMap["service-host"][0]["svc:ai-monitor"]` — the capability is a list of maps, so the index is required |
 | DNS | `ai-monitor.tail831c33.ts.net` resolves to the VIP |
 | Publication | `(tailnet only)`; Funnel off for every mapping |
-| The four earlier routes | `3773`, `8443`, `8444`, `8445` still published and tailnet-only; `curl -sk https://zoey.tail831c33.ts.net:8443/` and `...:8444/` answer 200. The mappings bind the tailnet address, so `127.0.0.1` does not answer |
+| Device routes still published | `3773` → `127.0.0.1:3773` and `8443` → `4096`, tailnet-only. `8443` answers 200; `3773` answers 502 because its backend is down |
+| Device routes no longer published | `8444` → `4002` and `8445` → `8000` are absent from `tailscale serve status`, and neither port connects. The same backends are served as `svc:router-litellm` (200) and `svc:vllm` (404 — reachable, no route at `/`) |
+| Loopback does not answer | the mappings bind the tailnet address, so `curl http://127.0.0.1:8443/` fails while the `ts.net` name works |
 | Service access | one packet-filter rule for the VIP, admitting the operator's devices and no `tag:agent` node |
-| Device rules | the allow-all device rule is untouched, which is why the four earlier routes are unaffected |
+| Device rules | the allow-all device rule is untouched, so the device routes that remain are unaffected by the Service work |
 
 The table is observations only. One consequence is not: nothing listens on `8732`
 until task 5.2 starts the service, so the Service has no backend until then.
@@ -650,10 +652,22 @@ the requirement on this tailnet**, and the node-route form above is the fallback
 
 The other two Services advertised from this node, `svc:router-litellm` and
 `svc:vllm`, have no grant naming them, and no rule in this node's filter mentions
-their VIPs. Nothing that worked before depends on them either way: the device
-routes `8444` and `8445` still publish the same two backends (`4002` and `8000`).
+their VIPs.
 
-### Host state as surveyed (2026-10-19)
+**The device routes changed as well, and not because of this change.** Checked on
+2026-10-20: `tailscale serve status` no longer lists `8444` or `8445`, and a request
+to either port no longer connects. Their backends are still served —
+`https://router-litellm.tail831c33.ts.net/` answers 200 and
+`https://vllm.tail831c33.ts.net/` answers 404, which is a live backend with no route
+at `/`. The Service advertisement below is a separate `--service` call and does not
+remove mappings, so confirm the removal was intended. If a client still uses a
+device URL, restore it with `sudo tailscale serve --bg --https=8444
+http://127.0.0.1:4002`, and the same for `8445` → `8000`.
+
+### Host state as first surveyed (2026-10-19)
+
+The Serve list in this table is the state before the Service work; the table above
+has the current one.
 
 | Fact | Value |
 | --- | --- |
@@ -714,7 +728,7 @@ is global: the broad rule grants every port except `443` on every host.
 One consequence follows, and it is worth checking before applying the change: if
 any other node serves HTTPS on `443` inside the tailnet, it becomes unreachable and
 needs a grant of its own. If that is a problem, serve the widget API on a dedicated
-port instead. `9443` is free on `zoey` (`3773`, `8443`, `8444`, `8445` are taken)
+port instead. `9443` is free on `zoey`, which serves `3773` and `8443` as device mappings
 and nothing else is likely to use it, which makes the exclusion harmless. Change
 the port in the `serve` command below and in both rules.
 
