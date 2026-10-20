@@ -176,6 +176,15 @@ class Database:
     def apply_retention(self, retention_days: int) -> int:
         """Delete observations strictly older than ``retention_days``.
 
+        The newest successful row of every source survives regardless of its age. The
+        spec requires that retention remove older observations "without affecting the
+        latest observation for each source", and a source that has been failing or
+        dormant for longer than the window would otherwise lose the only observation it
+        has: ``/api/v1/usage`` would have nothing to serve for it, and the next restart
+        would have nothing to seed from. The newest row is selected the same way
+        ``latest_per_source`` selects it — ``collected_at DESC, id DESC``, ties included —
+        so retention cannot keep one row while reads prefer another.
+
         Returns the number of rows removed. VACUUM is run in autocommit
         mode (no explicit transaction) to avoid SQLite's "cannot VACUUM
         from within a transaction" error.
@@ -184,8 +193,32 @@ class Database:
             datetime.now(timezone.utc) - timedelta(days=retention_days)
         ).strftime("%Y-%m-%dT%H:%M:%S")
         with self._lock:
+            protected = [
+                row["id"]
+                for row in self._conn.execute(
+                    """
+                    SELECT o2.id AS id
+                      FROM observations o2
+                     WHERE o2.status = 'success'
+                       AND o2.id = (
+                           SELECT o3.id
+                             FROM observations o3
+                            WHERE o3.source = o2.source
+                              AND o3.status = 'success'
+                            ORDER BY o3.collected_at DESC, o3.id DESC
+                            LIMIT 1
+                       )
+                    """
+                )
+            ]
+            # An empty list would make `id NOT IN (NULL)` match nothing at all, so
+            # retention would silently stop deleting anything.
+            holes = ", ".join("?" for _ in protected) if protected else "?"
+            params = [cutoff, *(protected or [-1])]
             cur = self._conn.execute(
-                "DELETE FROM observations WHERE collected_at < ?", (cutoff,)
+                f"DELETE FROM observations WHERE collected_at < ? "
+                f"AND id NOT IN ({holes})",
+                params,
             )
             deleted = cur.rowcount
             if deleted and deleted > 10000:

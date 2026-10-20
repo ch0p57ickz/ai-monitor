@@ -904,6 +904,17 @@ response, with no `[redacted]` or `***` markers either.
 defect: `accountId` is null, account-scoped trends are off, and one startup warning says
 so.
 
+### Accepted limitation: the attempt timestamps in `/health` live in memory
+
+`lastSuccessAt` survives a restart, because the worker seeds it from the source's newest
+stored observation — visible above, where the OpenRouter rows kept their pre-restart
+`lastSuccessAt` while reporting the new failure. `lastAttemptAt` and the error category do
+not survive: the schema stores successful observations only, because the spec keeps
+failures visible through health alone. So between the process starting and each source's
+first poll completing, `/health` reports `lastAttemptAt: null` for that source. On this
+host those first polls finish in the same second as startup, so a stored attempt column
+would cover a window under a second wide; it is accepted rather than fixed.
+
 ## Capability summary for adapter enablement
 
 | Source | Enable now? | Notes |

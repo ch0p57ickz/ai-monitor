@@ -144,3 +144,76 @@ class TestRetention:
         latest = sample_db.latest_per_source()
         codex = next(e for e in latest if e["source"] == "codex")
         assert codex["status"] == "success"
+
+    def test_apply_retention_keeps_the_latest_row_of_a_dormant_source(
+        self, sample_db: Database
+    ):
+        """The spec: retention must not affect the latest observation for each source.
+
+        A source that has been failing longer than the window has only its one row, and
+        losing it would leave `/api/v1/usage` with nothing to serve and the next restart
+        with nothing to seed from.
+        """
+        source, obs_old = make_obs("codex", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(source)
+        sample_db.insert_observation(source, obs_old)
+
+        deleted = sample_db.apply_retention(retention_days=30)
+
+        assert deleted == 0
+        codex = next(
+            e for e in sample_db.latest_per_source() if e["source"] == "codex"
+        )
+        assert codex["status"] == "success"
+        assert codex["collected_at"] == "2020-01-01T00:00:00Z"
+
+    def test_apply_retention_still_deletes_older_rows_of_that_source(
+        self, sample_db: Database
+    ):
+        """One row per source is protected, not the whole source."""
+        source, obs_oldest = make_obs("codex", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(source)
+        sample_db.insert_observation(source, obs_oldest)
+        _, obs_older = make_obs("codex", "2020-06-01T00:00:00Z")
+        sample_db.insert_observation(source, obs_older)
+        _, obs_new = make_obs("codex", now_iso())
+        sample_db.insert_observation(source, obs_new)
+
+        # Both expired rows go: the protected one is the newest, which is current.
+        deleted = sample_db.apply_retention(retention_days=30)
+
+        assert deleted == 2
+        codex = next(
+            e for e in sample_db.latest_per_source() if e["source"] == "codex"
+        )
+        assert codex["collected_at"] == obs_new.collected_at
+
+    def test_retention_keeps_the_row_the_reads_would_have_served(
+        self, sample_db: Database
+    ):
+        """With several expired rows, the survivor is the one ``latest_per_source`` picks.
+
+        Retention and the read path must agree on which row is "the latest", or a
+        source could keep a row that nothing serves.
+        """
+        source, obs_oldest = make_obs("codex", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(source)
+        sample_db.insert_observation(source, obs_oldest)
+        _, obs_newer = make_obs("codex", "2020-06-01T00:00:00Z")
+        sample_db.insert_observation(source, obs_newer)
+
+        before = next(
+            e for e in sample_db.latest_per_source() if e["source"] == "codex"
+        )
+
+        deleted = sample_db.apply_retention(retention_days=30)
+
+        assert deleted == 1
+        after = next(
+            e for e in sample_db.latest_per_source() if e["source"] == "codex"
+        )
+        assert after["collected_at"] == before["collected_at"] == "2020-06-01T00:00:00Z"
+
+    def test_apply_retention_with_no_rows_deletes_nothing(self, sample_db: Database):
+        """An empty protected set must not turn into a no-op ``NOT IN (NULL)``."""
+        assert sample_db.apply_retention(retention_days=30) == 0
