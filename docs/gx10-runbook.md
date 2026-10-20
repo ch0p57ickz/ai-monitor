@@ -1069,3 +1069,26 @@ identity and VIPs are readable from `zoey`, without the console.
 
 Steps 2-4 need the devices, so they run with the operator present. Step 5 and the
 survey above run without privileges.
+
+**Recorded results (2026-10-19/20).**
+
+| Step | Result |
+| --- | --- |
+| 1. Backend answers locally | Pass — `127.0.0.1:8732` answers `200`; `/api/v1/version` reports `0.1.0` |
+| 2. macOS client | Pending |
+| 3. iPhone client | **Pass — 2026-10-20 02:01:22 UTC**: `/health` returned `degraded`, with `codex` and both OpenRouter sources healthy and `antigravity` `unavailable` |
+| 4. Denied device | Pending — the decisive one |
+| 5. Funnel stays off | Pass — `tailscale funnel status` shows `(tailnet only)` for every mapping, including `svc:ai-monitor` |
+
+Step 3 is evidence rather than a positive control: the service binds `127.0.0.1` only, so
+the iPhone could not have reached it by any path except the Service.
+
+For step 4, the `tag:agent` nodes online at the time of the step 3 pass were `rumi`,
+`mira`, `ranger`, `grafana`, `happier`, and `livesync`; `hermes` and `openclaw-gx10` were
+offline. Run this on one of the online ones:
+
+```sh
+# On the tag:agent node. Any answer other than 200 is the expected result: a 200 means
+# the Service does not restrict, and the node-route form above is the fallback.
+curl -sS -m 10 -o /dev/null -w 'http=%{http_code}\n' https://ai-monitor.tail831c33.ts.net/health
+```

@@ -815,6 +815,14 @@ question, and only a request from a `tag:agent` node answers it. **If that reque
 returns data, the Service path does not meet task 5.3's denial requirement and the
 node-route form — narrowing the device rules for the served port — is the fallback.**
 
+**The intended iPhone client does reach it (2026-10-20 02:01:22 UTC).** `iphone182-2`
+fetched `/health` over the Service name and got the full payload: `degraded`, `codex`
+healthy, both OpenRouter sources healthy, `antigravity` `unavailable`. That the service
+binds `127.0.0.1` only makes this evidence rather than a positive control — the iPhone
+had no other route to it. The macOS client and the `tag:agent` denial are still pending;
+the `tag:agent` nodes online at that moment were `rumi`, `mira`, `ranger`, `grafana`,
+`happier`, and `livesync`.
+
 ### The restart survived the data, and exposed a credential gap (resolved)
 
 The operator restarted the unit at **18:49:53 PDT** (01:49:53 UTC; `MainPID` 3478058 →
