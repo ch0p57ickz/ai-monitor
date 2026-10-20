@@ -1075,10 +1075,18 @@ survey above run without privileges.
 | Step | Result |
 | --- | --- |
 | 1. Backend answers locally | Pass — `127.0.0.1:8732` answers `200`; `/api/v1/version` reports `0.1.0` |
-| 2. macOS client | Pending |
+| 2. macOS client | **Waived by the operator, 2026-10-20** — not run |
 | 3. iPhone client | **Pass — 2026-10-20 02:01:22 UTC**: `/health` returned `degraded`, with `codex` and both OpenRouter sources healthy and `antigravity` `unavailable` |
-| 4. Denied device | Pending — the decisive one |
+| 4. Denied device | **Waived by the operator, 2026-10-20** — not run, so the denial is unproven |
 | 5. Funnel stays off | Pass — `tailscale funnel status` shows `(tailnet only)` for every mapping, including `svc:ai-monitor` |
+
+The operator waived steps 2 and 4 on 2026-10-20, closing 5.3 on the iPhone pass, the
+Funnel-off check, and the response-size check. **The denial has no evidence behind it.**
+The packet filter is permissive toward the Service VIP — its allow-all rule parses to
+`0.0.0.0/0` and `::/0` — so whether an ungranted peer is stopped depends on
+access-controlled routing, and only a request from another node can show it. The command
+below stays here so it can be run the next time a `tag:agent` node is at hand, and the
+node-route form stays as the fallback if that request returns data.
 
 Step 3 is evidence rather than a positive control: the service binds `127.0.0.1` only, so
 the iPhone could not have reached it by any path except the Service.

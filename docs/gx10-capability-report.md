@@ -819,9 +819,14 @@ node-route form — narrowing the device rules for the served port — is the fa
 fetched `/health` over the Service name and got the full payload: `degraded`, `codex`
 healthy, both OpenRouter sources healthy, `antigravity` `unavailable`. That the service
 binds `127.0.0.1` only makes this evidence rather than a positive control — the iPhone
-had no other route to it. The macOS client and the `tag:agent` denial are still pending;
-the `tag:agent` nodes online at that moment were `rumi`, `mira`, `ranger`, `grafana`,
-`happier`, and `livesync`.
+had no other route to it.
+
+**The macOS check and the `tag:agent` denial were waived by the operator on 2026-10-20**,
+so the denial has no evidence behind it and this document claims none. The filter is
+permissive toward the Service VIP, so only a request from another node can settle it;
+the runbook keeps the command and the node-route fallback for when a `tag:agent` node is
+next at hand. The `tag:agent` nodes online at the time were `rumi`, `mira`, `ranger`,
+`grafana`, `happier`, and `livesync`.
 
 ### The restart survived the data, and exposed a credential gap (resolved)
 
