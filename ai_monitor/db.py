@@ -193,28 +193,42 @@ class Database:
             datetime.now(timezone.utc) - timedelta(days=retention_days)
         ).strftime("%Y-%m-%dT%H:%M:%S")
         with self._lock:
-            protected = [
+            # One lookup per source, not one per stored row: the correlated subquery
+            # uses idx_obs_source_time, and this sweep holds the database lock that the
+            # HTTP reads and the collector's inserts also need.
+            # Deduplicated so the placeholder list stays one entry per source: passing
+            # every stored row's id instead would work but would grow the statement with
+            # the table.
+            protected = {
                 row["id"]
                 for row in self._conn.execute(
                     """
-                    SELECT o2.id AS id
-                      FROM observations o2
-                     WHERE o2.status = 'success'
-                       AND o2.id = (
-                           SELECT o3.id
-                             FROM observations o3
-                            WHERE o3.source = o2.source
-                              AND o3.status = 'success'
-                            ORDER BY o3.collected_at DESC, o3.id DESC
-                            LIMIT 1
-                       )
+                    SELECT (
+                        SELECT o3.id
+                          FROM observations o3
+                         WHERE o3.source = s.source
+                           AND o3.status = 'success'
+                         ORDER BY o3.collected_at DESC, o3.id DESC
+                         LIMIT 1
+                    ) AS id
+                      FROM (
+                          SELECT DISTINCT source
+                            FROM observations
+                           WHERE status = 'success'
+                      ) AS s
                     """
                 )
-            ]
-            # An empty list would make `id NOT IN (NULL)` match nothing at all, so
-            # retention would silently stop deleting anything.
+            }
+            # An empty set would make `id NOT IN (NULL)` match nothing at all, so
+            # retention would silently stop deleting anything. Ids are positive, so -1
+            # cannot collide.
             holes = ", ".join("?" for _ in protected) if protected else "?"
-            params = [cutoff, *(protected or [-1])]
+            params = [cutoff, *sorted(protected or {-1})]
+            # The two statements run under the same lock on a single connection, so the
+            # protected set cannot change between them, and each is atomic on its own in
+            # autocommit mode: an interruption leaves all or none of the expired rows
+            # gone. An explicit transaction would add nothing here and would have to be
+            # closed before the VACUUM below, which cannot run inside one.
             cur = self._conn.execute(
                 f"DELETE FROM observations WHERE collected_at < ? "
                 f"AND id NOT IN ({holes})",

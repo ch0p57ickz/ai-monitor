@@ -217,3 +217,53 @@ class TestRetention:
     def test_apply_retention_with_no_rows_deletes_nothing(self, sample_db: Database):
         """An empty protected set must not turn into a no-op ``NOT IN (NULL)``."""
         assert sample_db.apply_retention(retention_days=30) == 0
+
+    def test_retention_protects_the_row_the_reads_serve_not_the_newest_row(
+        self, sample_db: Database
+    ):
+        """A non-success row must not become the protected one.
+
+        `insert_observation` stores successes only, so this needs a row written directly.
+        The retention query and `latest_per_source` still have to agree on which row is
+        "the latest": protecting a newer non-success row would delete the success row
+        that reads serve.
+        """
+        source, obs_old = make_obs("codex", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(source)
+        sample_db.insert_observation(source, obs_old)
+        sample_db._conn.execute(
+            "INSERT INTO observations (source, provider, collected_at, observed_at,"
+            " account_id, status, quota_windows_json, budgets_json, notes_json)"
+            " VALUES ('codex', 'codex', '2020-06-01T00:00:00Z', '2020-06-01T00:00:00Z',"
+            " NULL, 'error', '[]', '[]', '{}')"
+        )
+
+        deleted = sample_db.apply_retention(retention_days=30)
+
+        assert deleted == 1  # the expired non-success row, and nothing else
+        codex = next(
+            e for e in sample_db.latest_per_source() if e["source"] == "codex"
+        )
+        assert codex["status"] == "success"
+        assert codex["collected_at"] == "2020-01-01T00:00:00Z"
+
+    def test_retention_spares_a_dormant_source_while_sweeping_a_live_one(
+        self, sample_db: Database
+    ):
+        """Sources are judged separately: one protected row each, not one overall."""
+        dormant, dormant_old = make_obs("codex", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(dormant)
+        sample_db.insert_observation(dormant, dormant_old)
+
+        live, live_old = make_obs("openrouter-key", "2020-01-01T00:00:00Z")
+        sample_db.upsert_source(live)
+        sample_db.insert_observation(live, live_old)
+        _, live_new = make_obs("openrouter-key", now_iso())
+        sample_db.insert_observation(live, live_new)
+
+        deleted = sample_db.apply_retention(retention_days=30)
+
+        assert deleted == 1
+        latest = {e["source"]: e for e in sample_db.latest_per_source()}
+        assert latest["codex"]["collected_at"] == "2020-01-01T00:00:00Z"
+        assert latest["openrouter-key"]["collected_at"] == live_new.collected_at
