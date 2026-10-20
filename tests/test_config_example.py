@@ -213,15 +213,23 @@ def test_the_example_port_is_the_one_serve_proxies(runbook_text):
     a wrapped command, since the runbook wraps long lines.
     """
     lines = runbook_text.replace("\\\n", " ").splitlines()
+    # Paired lines, so a command reads the same whether or not it is wrapped. The
+    # sentinel makes the final line pairable: without it, a command on the last line
+    # is never scanned.
+    lines.append("")
+    pairs = [f"{line} {lines[index + 1]}" for index, line in enumerate(lines[:-1])]
+    # Scoped by the pair, not the line: a wrap can put the command on one line and
+    # its selector on the next. This also keeps the route documented for a different
+    # service (8444 -> 4002) out of the comparison.
     commands = [
-        f"{line} {following}"
-        for line, following in zip(lines, lines[1:])
-        if "tailscale serve" in line
-        and ("svc:ai-monitor" in line or "--https=443" in line)
+        pair
+        for pair in pairs
+        if "tailscale serve" in pair
+        and ("svc:ai-monitor" in pair or "--https=443" in pair)
     ]
-    assert len(commands) >= 2, (
-        "the runbook should document the deployed and fallback Serve commands; "
-        f"found {len(commands)}"
+    assert commands, (
+        "no Serve command for this service was found; comparing against nothing "
+        "would pass for any port"
     )
     proxied: set[str] = set()
     for command in commands:
