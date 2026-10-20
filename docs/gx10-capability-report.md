@@ -618,6 +618,11 @@ the upgrade restart is a fourth data-preservation pass.
 **Backup** — `install -d` for the target, the online `.backup`, `chmod 0600`, and
 `pragma integrity_check`, which returned `ok` on the file produced.
 
+**A second run of the same block at 19:26:26 PDT** put the retention fix live, and
+`ai_monitor/` and `tools/` in the deployed tree again hash identically to the checkout.
+The deployed service therefore runs the revision these documents describe; `tests/` stays
+behind in `/opt`, which is expected, because the allowlist does not copy it.
+
 Still unrun: the rollback's revision-selection step, checking out an earlier SHA in the
 operator's checkout. Its copy, install, and restart half is the upgrade sequence above,
 and the pip-level rollback was rehearsed in a temporary venv, so only the SHA selection
