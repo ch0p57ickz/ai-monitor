@@ -178,9 +178,9 @@ def _read_state_file(path: Path) -> str:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
-        if info.st_uid != os.getuid():
+        if info.st_uid != os.geteuid():
             raise RuntimeError(
-                f"{path} is owned by uid {info.st_uid}, not by you (uid {os.getuid()}); "
+                f"{path} is owned by uid {info.st_uid}, not by you (uid {os.geteuid()}); "
                 f"a state file another user can edit proves nothing. Capture again as "
                 f"the user that will verify."
             )

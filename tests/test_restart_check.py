@@ -265,6 +265,31 @@ class TestStateFilePermissions:
         with pytest.raises(OSError):
             check._read_state_file(link)
 
+    def test_a_state_file_owned_by_someone_else_is_refused(self, check, tmp_path, monkeypatch):
+        path = tmp_path / "foreign.json"
+        check._write_state_file(path, _state())
+        monkeypatch.setattr(check.os, "geteuid", lambda: 99999)
+        with pytest.raises(RuntimeError, match="not by you"):
+            check._read_state_file(path)
+
+    def test_a_failed_write_does_not_leave_a_usable_state_file(
+        self, check, tmp_path, monkeypatch
+    ):
+        """`O_TRUNC` runs first, so a failed capture must not leave a valid file."""
+
+        def boom(fd, mode):
+            raise PermissionError("EPERM")
+
+        path = tmp_path / "state.json"
+        check._write_state_file(path, _state())  # a valid capture already exists
+        monkeypatch.setattr(check.os, "fchmod", boom)
+        with pytest.raises(OSError):
+            check._write_state_file(path, _state())
+        monkeypatch.undo()
+        # Whatever it left behind is refused, not read as the new capture.
+        with pytest.raises(json.JSONDecodeError):
+            check._validate_state(json.loads(check._read_state_file(path)))
+
 
 class TestVerify:
     def test_passes_with_a_new_pid_and_the_same_rows(self, check):
