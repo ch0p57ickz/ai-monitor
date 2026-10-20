@@ -545,3 +545,8 @@ class TestRunbookUsesIt:
         """Exit 2 covers age and permission refusals, so the operator must recapture."""
         assert "Exit 2 is not a pass" in prose
         assert "capture again" in prose
+
+    def test_the_runbook_rechecks_every_source_after_a_restart(self, prose):
+        """A restart re-reads the config, which is where a missing key shows."""
+        assert "per-source states" in prose
+        assert "not_configured" in prose

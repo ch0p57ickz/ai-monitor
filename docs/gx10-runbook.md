@@ -455,6 +455,28 @@ reports `FAIL: the unit's main PID did not change`, which is the point of the PI
 Run it after the first restart, and after every upgrade. Run the tool from the
 checkout: the deployed copy is only as new as the last install.
 
+### A restart is also where a configuration gap shows (task 5.2)
+
+The new process re-reads `/etc/ai-monitor/config.json`; the old one kept whatever it
+loaded at its own start. So compare the per-source states in `/health` before and after
+the restart. A source that was healthy and comes back `operator_action` with
+`errorCategory: not_configured` means a key is missing from the config the service
+reads, not that the provider changed.
+
+Observed on this host on 2026-10-19. The process running since 18:15:34 PDT served both
+OpenRouter sources; the restart at 18:49:53 came back with `not_configured` for both.
+`/health` still showed their `lastSuccessAt` and `/api/v1/usage` still served the
+pre-restart observations as `fresh`, so the widget looks right for a few minutes after
+collection has already stopped — the rows only go stale at their `staleAfter`
+timestamp, which was 18:55:40 here.
+
+That same restart is the data-side evidence 5.2 asks for: the new process still served
+48 of the 49 rows the previous one had collected, the oldest from its first collection
+at 18:15:34, and none of them were re-collected. Run a strict `--capture`/`--verify`
+cycle at the next restart. The first attempt here exited 2 with `Connection refused`
+because the capture ran while the unit was down, which is the skip path working as
+intended rather than a defect.
+
 ## Upgrade
 
 ```sh

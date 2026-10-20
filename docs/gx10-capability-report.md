@@ -782,6 +782,7 @@ subcommand, and it does not affect the other three.
 **Both OpenRouter streams are healthy**, which is the first time the real credential
 path has run in the deployment: the operator set `openrouter_api_key`, so
 `openrouter-key` collects from `/api/v1/key` instead of reporting `not_configured`.
+That held until the restart below, which came back without the key.
 
 **`account_digest_key` is not set.** The startup warning says so —
 
@@ -814,13 +815,37 @@ question, and only a request from a `tag:agent` node answers it. **If that reque
 returns data, the Service path does not meet task 5.3's denial requirement and the
 node-route form — narrowing the device rules for the served port — is the fallback.**
 
-**The restart check is still outstanding.** 5.2 asks for a restart that preserves
-cached data, and none has happened since collection began: the process start
-(18:15:34) and the oldest stored row (18:15:34) are the same second, so there is no
-evidence either way. `systemctl restart` needs interactive authentication on this
-host, so the operator runs it. The check is a comparison, not a glance: record the
-served `collectedAt` values, restart, then confirm the history still carries those
-exact timestamps. A fresh poll would satisfy a glance without proving anything.
+### The restart happened, and it exposed a credential gap
+
+The operator restarted the unit at **18:49:53 PDT** (01:49:53 UTC; `MainPID` 3478058 →
+3564896, `Result=success`). This is the restart 5.2 asks about.
+
+It preserved the data. Afterwards, `/api/v1/usage/history` still served 48 of the 49
+rows the previous process had collected, the oldest from its first collection at
+18:15:34 PDT, and none of them were re-collected. Rows recorded by a process that no
+longer exists were still served by its replacement, which is the property the criterion
+names. A strict `tools/restart_check.py` `--capture`/`--verify` cycle has not been run:
+the capture was attempted while the unit was down and exited 2 with
+`Connection refused`, which is the tool's skip path rather than a defect.
+
+**The restart also came back without the OpenRouter credentials.** `/health` now reports
+`operator_action` with `errorCategory: not_configured` for both OpenRouter sources,
+minutes after the previous process reported them healthy. The adapters raise that
+category when the key is empty (`ai_monitor/sources/registry.py`), and the package reads
+credentials only from `/etc/ai-monitor/config.json`: it reads no credential environment
+variables and no `.env`, so this is about the config the restart loaded, not about a
+file that went missing from the tree. A restart re-reads that config; the process before
+it kept what it had loaded at 18:15:34.
+
+The failure is quiet in the product. `/api/v1/usage` kept serving the pre-restart
+OpenRouter observations as `fresh`, and they only reach `staleAfter` at 18:55:40, so the
+widget looks correct for minutes after collection has stopped. `/health` is the surface
+that shows it, and `serviceStatus` stays `degraded` either way, because `antigravity` is
+always `unavailable` on this host.
+
+Until the key is restored and the unit restarted, OpenRouter data is frozen at 18:45:40
+and nothing further is collected. Task 5.2's "credential access" clause is not met at
+present, and `account_digest_key` remains unset.
 
 ## Capability summary for adapter enablement
 
