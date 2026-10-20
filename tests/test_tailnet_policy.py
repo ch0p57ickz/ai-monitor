@@ -32,7 +32,10 @@ RUNBOOK = Path(__file__).resolve().parent.parent / "docs" / "gx10-runbook.md"
 # The port the widget API is served on, and the ports zoey already serves for
 # other things (surveyed in task 5.3). The policy change must not narrow those.
 WIDGET_PORT = 443
-EXISTING_SERVED_PORTS = (3773, 8443, 8444, 8445)
+#: The device routes zoey serves today. `8444` and `8445` were removed
+#: intentionally on 2026-10-20 and their backends answer as Services instead, so
+#: they are no longer samples of "a port that must keep the reach it has".
+EXISTING_SERVED_PORTS = (3773, 8443)
 
 OPERATOR = "papaya.ch0mp@gmail.com"
 # The identity that must be denied: the tagged service nodes, which belong to the
@@ -211,7 +214,7 @@ def test_the_operator_reaches_the_widget_port(policy, zoey_ip):
 
 
 def test_every_other_port_stays_open_to_every_device(policy, zoey_ip):
-    """The four routes zoey already serves must keep their reach."""
+    """The device routes zoey serves must keep the reach they have."""
     for port in EXISTING_SERVED_PORTS:
         assert any(
             src == "*" and _reaches(host, spec, zoey_ip, port)

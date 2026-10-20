@@ -23,8 +23,11 @@
 //      before applying; the alternative is to serve the widget API on a
 //      dedicated port (see the runbook).
 //   2. Every other port keeps exactly the reach it has today, which is what keeps
-//      zoey's four existing Serve routes (3773, 8443, 8444, 8445) working for
-//      every device.
+//      zoey's device routes (3773, 8443) working for every device. The two that
+//      were once served on 8444 and 8445 were removed deliberately on 2026-10-20;
+//      their backends now answer as the Services `svc:router-litellm` and
+//      `svc:vllm`, which this rule does not name, so they need a grant of their
+//      own for the same reason port 443 does.
 //
 // Merge this into the existing policy file. If that file already defines groups,
 // tagOwners, nodeAttrs, or grants, keep them: replace only the rule that grants

@@ -379,7 +379,7 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Item | Value |
 | --- | --- |
 | Serve available | Yes (Serve is in the stable package; present in 1.102.4 and 1.104.1) |
-| Current HTTPS publications | Two device mappings plus three Services, all `(tailnet only)`: device `3773`, `8443`; Services `svc:ai-monitor` on `443`, `svc:router-litellm`, `svc:vllm`. As of 2026-10-20 the device mappings `8444` and `8445` are gone and neither port connects; the same backends (`4002`, `8000`) answer under the two Service names (200 and 404) |
+| Current HTTPS publications | Two device mappings plus three Services, all `(tailnet only)`: device `3773`, `8443`; Services `svc:ai-monitor` on `443`, `svc:router-litellm`, `svc:vllm`. As of 2026-10-20 the device mappings `8444` and `8445` are gone and neither port connects — **the operator confirmed the removal was intentional** — and the same backends (`4002`, `8000`) answer under the two Service names (200 and 404) |
 | Funnel | Off — `tailscale funnel status` reports every mapping as `(tailnet only)` |
 | HTTPS certificates | Enabled in the tailnet (the existing mappings already use `ts.net` names) |
 | Node and domain | `zoey` (`100.108.85.109`), `zoey.tail831c33.ts.net` |

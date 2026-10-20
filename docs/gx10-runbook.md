@@ -735,7 +735,7 @@ Observed:
 | DNS | `ai-monitor.tail831c33.ts.net` resolves to the VIP |
 | Publication | `(tailnet only)`; Funnel off for every mapping |
 | Device routes still published | `3773` → `127.0.0.1:3773` and `8443` → `4096`, tailnet-only. `8443` answers 200; `3773` answers 502 because its backend is down |
-| Device routes no longer published | `8444` → `4002` and `8445` → `8000` are absent from `tailscale serve status`, and neither port connects. The same backends are served as `svc:router-litellm` (200) and `svc:vllm` (404 — reachable, no route at `/`) |
+| Device routes no longer published | `8444` → `4002` and `8445` → `8000` are absent from `tailscale serve status`, and neither port connects. **The operator confirmed on 2026-10-20 that the removal was intentional.** The same backends are served as `svc:router-litellm` (200) and `svc:vllm` (404 — reachable, no route at `/`) |
 | Loopback does not answer | the mappings bind the tailnet address, so `curl http://127.0.0.1:8443/` fails while the `ts.net` name works |
 | Service access | one packet-filter rule for the VIP, admitting the operator's devices and no `tag:agent` node |
 | Device rules | the allow-all device rule is untouched, so the device routes that remain are unaffected by the Service work |
@@ -762,15 +762,15 @@ The other two Services advertised from this node, `svc:router-litellm` and
 `svc:vllm`, have no grant naming them, and no rule in this node's filter mentions
 their VIPs.
 
-**The device routes changed as well, and not because of this change.** Checked on
-2026-10-20: `tailscale serve status` no longer lists `8444` or `8445`, and a request
-to either port no longer connects. Their backends are still served —
+**The device routes changed as well, and deliberately.** Checked on 2026-10-20:
+`tailscale serve status` no longer lists `8444` or `8445`, and a request to either port
+no longer connects. The operator confirmed on 2026-10-20 that the removal was
+intentional. Their backends are still served under Service names —
 `https://router-litellm.tail831c33.ts.net/` answers 200 and
-`https://vllm.tail831c33.ts.net/` answers 404, which is a live backend with no route
-at `/`. The Service advertisement below is a separate `--service` call and does not
-remove mappings, so confirm the removal was intended. If a client still uses a
-device URL, restore it with `sudo tailscale serve --bg --https=8444
-http://127.0.0.1:4002`, and the same for `8445` → `8000`.
+`https://vllm.tail831c33.ts.net/` answers 404, which is a live backend with no route at
+`/` — so no device URL is expected to work and there is nothing to restore. The Service
+advertisement below is a separate `--service` call and would not have removed the
+mappings in any case.
 
 ### Host state as first surveyed (2026-10-19)
 
@@ -782,7 +782,7 @@ has the current one.
 | Node | `zoey` (`100.108.85.109`) |
 | Tailnet domain | `zoey.tail831c33.ts.net` |
 | Served URL after this change | `https://ai-monitor.tail831c33.ts.net/` — the Service DNS name. Port `443` on `zoey` itself is not served |
-| Ports already served, tailnet only | `3773`, `8443`, `8444`, `8445` |
+| Ports already served, tailnet only | `3773`, `8443`, `8444`, `8445` — the last two were removed intentionally on 2026-10-20 (see the deployed-state table) |
 | Port 443 | free — not among the served mappings, and `ss -ltn` shows nothing listening on it |
 | `127.0.0.1:8732` | free — the service's `api_port`, per `ss -ltn` |
 | Funnel | off. `tailscale funnel status` lists every mapping as `(tailnet only)` |
