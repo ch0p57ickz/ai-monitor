@@ -931,8 +931,9 @@ identity and VIPs are readable from `zoey`, without the console.
 ### Acceptance checks (operator present)
 
 1. **The Service answers at all.** Start the service first (task 5.2) — until it
-   runs, nothing listens on `8732` and the Service returns 502. Then confirm the
-   API locally: `curl -s http://127.0.0.1:8732/api/v1/version`.
+   runs, nothing listens on `8732`, so the Service has no backend and this check
+   cannot pass. Then confirm the API locally:
+   `curl -s http://127.0.0.1:8732/api/v1/version`.
 2. **Intended client — macOS.** From `jamess-macbook-pro`, open
    `https://ai-monitor.tail831c33.ts.net/api/v1/version` and confirm the version
    JSON. The Service DNS name is the address, not `zoey.tail831c33.ts.net`: port
