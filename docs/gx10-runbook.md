@@ -3,13 +3,17 @@
 Commands for starting, upgrading, backing up, rolling back, and rotating
 credentials for the loopback usage service on the GX10 host (`zoey`).
 
-**Verification status:** the backup and restore procedure has been executed end
-to end against a live service by `tools/backup_restore_check.py`, and the example
-config it installs is loaded by the test suite. Nothing else here has run against
-a deployed unit: the install, the `systemctl` lifecycle commands, and the Tailscale
-steps need `sudo` and operator approval (tasks 5.2-5.4). The soak and reset checks
-in 5.1 were run on this host without privileges. Treat everything outside the
-backup/restore procedure as reviewed-but-unexecuted until the first install.
+**Verification status:** the install has run on this host and the service is serving
+real data (`5.2`, live since 2026-10-19 18:15 PDT): the unit, the virtualenv, the
+config, and the guards over the example config and the install steps all stand behind
+what is written here, and the backup/restore procedure was executed end to end against
+a live service by `tools/backup_restore_check.py`.
+
+Still reviewed-but-unexecuted on the deployed host: **the restart-preservation check**
+(the procedure below; no restart has been run yet, so `tools/restart_check.py` has been
+rehearsed only to its `FAIL` path), the **Tailscale device checks** (`5.3`, which need
+the operator's devices), and the root commands for **upgrade, backup, rollback, and
+credential rotation** (`5.4`).
 
 ## Layout
 
@@ -411,6 +415,35 @@ appear in `journalctl` output or in a response body:
 journalctl -u ai-monitor --no-pager | grep -Ei 'bearer|api[_-]?key|sk-|@'
 # Expect no matches.
 ```
+
+### Verify a restart preserves cached data (task 5.2)
+
+A restart must serve what was collected before it, from the database.
+`tools/restart_check.py` makes both halves of that explicit: the unit's main PID
+must change, and every observation timestamp served before the restart must still be
+served after it. Either half alone passes wrongly — `UsageWorker.start()` polls
+immediately, so "is there data?" is true even when the database retained nothing, and
+a changed PID proves only that something restarted.
+
+```sh
+# 1. Capture, before the restart.
+python3 tools/restart_check.py --capture
+
+# 2. Restart.
+sudo systemctl restart ai-monitor
+systemctl is-active ai-monitor
+
+# 3. Verify. Exit 1 means the check failed; exit 2 means it could not run, which is
+#    not a pass.
+python3 tools/restart_check.py --verify
+```
+
+The state file is `/tmp/ai-monitor-restart-state.json` and holds a PID and
+timestamps, no credentials. Rehearsed against the running service on 2026-10-19:
+without a restart, `--verify` reports `FAIL: the unit's main PID did not change`,
+which is the point of the PID half. Run it after the first restart, and after every
+upgrade. Run the tool from the checkout: the deployed copy is only as new as the last
+install.
 
 ## Upgrade
 
