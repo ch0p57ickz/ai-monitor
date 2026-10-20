@@ -8,11 +8,13 @@ failures, the pass, and the CLI contract that separates a skip from a success:
 - a changed PID satisfies "did it restart?" even when the database lost everything —
   the captured timestamps must still be served.
 
-Two further inputs make the PID half true without a restart, and both were false
-passes before this file covered them: `systemctl show <no-such-unit>` exits 0 and
-prints `MainPID=0`, and a state file can be empty, malformed, captured from another
-unit, or too old for the API's 500-row limit to still cover it. Each must reach exit
-2, never exit 0.
+Every remaining way to make the PID half true without a restart is a false pass, and
+each one was live before this file covered it: `systemctl show <no-such-unit>` exits 0
+and prints `MainPID=0`; a state file can be empty, malformed, or carry a PID that can
+never equal a live one; it can be captured from another host, unit, or URL; it can be
+too old, or dated in the future, for the age guard to mean anything; and its
+permissions decide whether anyone else could have edited the verdict. The tests assert
+exit 2, not exit 0, for all of them.
 
 The tool is end-to-end against a running unit, so the injection here is at the two
 boundaries it has: the API fetch and `systemctl`.
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -92,8 +95,9 @@ BEFORE = ("2026-10-19T18:00:00Z", "2026-10-19T18:00:01Z")
 
 
 def _state(pid: str = "1000", **overrides) -> dict:
-    """A state file captured a moment ago."""
+    """A state file captured a moment ago, on this host."""
     state = {
+        "host": socket.gethostname(),
         "unit": "ai-monitor",
         "url": URL,
         "pid": pid,
@@ -115,6 +119,20 @@ class TestServedTimestamps:
         assert check.served_timestamps({}) == []
 
 
+class TestParseTimestamp:
+    def test_a_z_suffix_is_utc(self, check):
+        assert check._parse_timestamp("2026-10-19T18:00:00Z").isoformat() == (
+            "2026-10-19T18:00:00+00:00"
+        )
+
+    def test_a_missing_zone_is_read_as_utc(self, check):
+        assert check._parse_timestamp("2026-10-19T18:00:00").tzinfo == timezone.utc
+
+    def test_a_bogus_value_raises(self, check):
+        with pytest.raises(ValueError):
+            check._parse_timestamp("yesterday")
+
+
 class TestMainPid:
     def test_it_reads_the_pid(self, check):
         assert check.main_pid("ai-monitor", run=_runner("1000")) == "1000"
@@ -128,9 +146,10 @@ class TestMainPid:
         with pytest.raises(RuntimeError, match="not running"):
             check.main_pid("ai_monitor_typo", run=_runner("0"))
 
-    def test_an_empty_pid_is_not_a_pid_either(self, check):
+    @pytest.mark.parametrize("value", ["", "not-a-pid", "-1", "1.5"])
+    def test_a_pid_that_is_not_a_pid_is_not_a_restart(self, check, value):
         with pytest.raises(RuntimeError, match="not running"):
-            check.main_pid("ai-monitor", run=_runner(""))
+            check.main_pid("ai-monitor", run=_runner(value))
 
     def test_a_failed_systemctl_call_raises(self, check):
         with pytest.raises(RuntimeError, match="systemctl show"):
@@ -147,10 +166,18 @@ class TestStateValidation:
             [],  # not an object
             [1, 2],
             "text",
+            None,
             _state(pid=""),
             _state(pid="0"),
+            _state(pid="0000"),
+            _state(pid="not-a-pid"),
+            _state(pid="1000x"),
+            _state(pid=1000),
             _state(timestamps=[]),
             _state(timestamps="not a list"),
+            _state(timestamps=[None]),
+            _state(timestamps=["", "x"]),
+            _state(host=""),
             _state(unit=""),
             _state(url=""),
             _state(capturedAt=""),
@@ -165,25 +192,31 @@ class TestStateValidation:
 
 
 class TestCapture:
-    def test_records_the_pid_the_url_and_the_timestamps(self, check):
+    def test_records_the_host_the_pid_and_the_timestamps(self, check):
         state = check.capture(
             "ai-monitor",
             URL,
             fetch=_fetch(usage=_usage(*BEFORE)),
             run=_runner("1000"),
         )
+        assert state["host"] == socket.gethostname()
         assert state["unit"] == "ai-monitor"
         assert state["url"] == URL
         assert state["pid"] == "1000"
         assert state["timestamps"] == sorted(BEFORE)
         # Parses, and is recent, so a later `--verify` is not refused as stale.
-        assert (datetime.now(timezone.utc) - check._parse_timestamp(state["capturedAt"])).total_seconds() < 60
+        age = (datetime.now(timezone.utc) - check._parse_timestamp(state["capturedAt"])).total_seconds()
+        assert 0 <= age < 60
 
-    def test_it_takes_the_capture_time_from_the_payload_when_present(self, check):
-        payload = _usage(*BEFORE)
-        payload["generatedAt"] = "2026-10-19T18:00:02Z"
-        state = check.capture("ai-monitor", URL, fetch=_fetch(usage=payload), run=_runner("1000"))
-        assert check._parse_timestamp(state["capturedAt"]).isoformat() == "2026-10-19T18:00:02+00:00"
+    def test_it_normalises_a_trailing_slash(self, check):
+        """`--url http://host:8732/` would otherwise build `//api/v1/usage`."""
+        state = check.capture(
+            "ai-monitor",
+            f"{URL}/",
+            fetch=_fetch(usage=_usage(*BEFORE)),
+            run=_runner("1000"),
+        )
+        assert state["url"] == URL
 
     def test_it_refuses_to_capture_nothing(self, check):
         """An empty capture would make `--verify` pass on anything."""
@@ -203,6 +236,34 @@ class TestCapture:
                 fetch=_fetch(usage=_usage(*BEFORE)),
                 run=_runner("", returncode=1),
             )
+
+
+class TestStateFilePermissions:
+    def test_it_writes_the_state_file_mode_600(self, check, tmp_path):
+        path = tmp_path / "state.json"
+        check._write_state_file(path, _state())
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_it_writes_json_that_validates(self, check, tmp_path):
+        path = tmp_path / "state.json"
+        check._write_state_file(path, _state())
+        assert check._validate_state(json.loads(path.read_text()))["pid"] == "1000"
+
+    def test_a_group_writable_state_file_is_refused(self, check, tmp_path):
+        """A verdict read from a file anyone else can edit is not a verdict."""
+        path = tmp_path / "state.json"
+        check._write_state_file(path, _state())
+        path.chmod(0o666)
+        with pytest.raises(RuntimeError, match="writable by group or others"):
+            check._read_state_file(path)
+
+    def test_a_symlinked_state_file_is_refused(self, check, tmp_path):
+        real = tmp_path / "real.json"
+        check._write_state_file(real, _state())
+        link = tmp_path / "link.json"
+        link.symlink_to(real)
+        with pytest.raises(OSError):
+            check._read_state_file(link)
 
 
 class TestVerify:
@@ -254,19 +315,7 @@ class TestVerify:
         assert "main PID did not change" in report
         assert "no longer served" in report
 
-    def test_a_truncated_window_is_called_out(self, check):
-        """"Missing" from a truncated response may be outside the window, not lost."""
-        ok, report = check.verify(
-            _state(),
-            "ai-monitor",
-            URL,
-            fetch=_fetch(history=_history("2026-10-19T18:01:00Z", truncated=True)),
-            run=_runner("2000"),
-        )
-        assert not ok
-        assert "truncated" in report
-
-    def test_a_missing_timestamp_always_carries_the_window_caveat(self, check):
+    def test_an_untruncated_response_makes_an_absence_a_loss(self, check):
         ok, report = check.verify(
             _state(),
             "ai-monitor",
@@ -275,10 +324,41 @@ class TestVerify:
             run=_runner("2000"),
         )
         assert not ok
-        assert "at most 500 rows" in report
+        assert "not truncated" in report
+
+    def test_a_truncated_response_cannot_tell_a_loss_from_the_window(self, check):
+        """Past the byte cap, absence proves nothing either way, so it is exit 2."""
+        with pytest.raises(RuntimeError, match="truncated"):
+            check.verify(
+                _state(),
+                "ai-monitor",
+                URL,
+                fetch=_fetch(history=_history("2026-10-19T18:01:00Z", truncated=True)),
+                run=_runner("2000"),
+            )
+
+    def test_a_truncated_response_with_nothing_missing_still_passes(self, check):
+        ok, report = check.verify(
+            _state(),
+            "ai-monitor",
+            URL,
+            fetch=_fetch(history=_history(*BEFORE, truncated=True)),
+            run=_runner("2000"),
+        )
+        assert ok, report
+
+    def test_a_state_file_from_another_host_cannot_prove_this_one(self, check):
+        with pytest.raises(RuntimeError, match="captured on"):
+            check.verify(
+                _state(host="somewhere-else"),
+                "ai-monitor",
+                URL,
+                fetch=_fetch(history=_history(*BEFORE)),
+                run=_runner("2000"),
+            )
 
     def test_a_state_file_from_another_unit_cannot_prove_this_one(self, check):
-        with pytest.raises(RuntimeError, match="captured from"):
+        with pytest.raises(RuntimeError, match="captured on"):
             check.verify(
                 _state(unit="other-unit"),
                 "ai-monitor",
@@ -288,7 +368,7 @@ class TestVerify:
             )
 
     def test_a_state_file_from_another_url_cannot_prove_this_one(self, check):
-        with pytest.raises(RuntimeError, match="captured from"):
+        with pytest.raises(RuntimeError, match="captured on"):
             check.verify(
                 _state(url="http://127.0.0.1:9999"),
                 "ai-monitor",
@@ -297,11 +377,31 @@ class TestVerify:
                 run=_runner("2000"),
             )
 
+    def test_a_trailing_slash_is_not_a_mismatch(self, check):
+        ok, report = check.verify(
+            _state(),
+            "ai-monitor",
+            f"{URL}/",
+            fetch=_fetch(history=_history(*BEFORE)),
+            run=_runner("2000"),
+        )
+        assert ok, report
+
     def test_a_stale_capture_is_refused_rather_than_guessed(self, check):
-        """Past the row limit, a missing timestamp may be the query, not the data."""
         with pytest.raises(RuntimeError, match="minutes old"):
             check.verify(
-                _state(capturedAt=_ago(200)),
+                _state(capturedAt=_ago(45)),
+                "ai-monitor",
+                URL,
+                fetch=_fetch(history=_history(*BEFORE)),
+                run=_runner("2000"),
+            )
+
+    def test_a_future_capture_time_cannot_disable_the_age_guard(self, check):
+        """A negative age is never "too old", so it must be refused outright."""
+        with pytest.raises(RuntimeError, match="in the future"):
+            check.verify(
+                _state(capturedAt=_ago(-120)),
                 "ai-monitor",
                 URL,
                 fetch=_fetch(history=_history(*BEFORE)),
@@ -338,6 +438,7 @@ class TestCli:
         assert captured["timestamps"] == sorted(BEFORE)
         assert captured["pid"] == "2000"
         assert captured["url"] == check.DEFAULT_URL
+        assert state.stat().st_mode & 0o777 == 0o600
 
         holder["pid"] = "3000"  # the restart
         assert check.main(["--verify", "--state", str(state)]) == 0
@@ -357,6 +458,12 @@ class TestCli:
         assert check.main(["--verify", "--state", str(state)]) == 2
         assert "not running" in capsys.readouterr().err
 
+    def test_a_unit_change_is_not_a_pass(self, wired, capsys):
+        check, state, _ = wired
+        assert check.main(["--capture", "--state", str(state)]) == 0
+        assert check.main(["--verify", "--state", str(state), "--unit", "other"]) == 2
+        assert "captured on" in capsys.readouterr().err
+
     def test_an_empty_state_file_is_not_a_pass(self, wired, tmp_path, capsys):
         check, _, _ = wired
         empty = tmp_path / "empty.json"
@@ -369,6 +476,11 @@ class TestCli:
         bad = tmp_path / "list.json"
         bad.write_text("[1, 2]", encoding="utf-8")
         assert check.main(["--verify", "--state", str(bad)]) == 2
+        assert "cannot run" in capsys.readouterr().err
+
+    def test_capturing_into_a_directory_is_not_a_pass(self, wired, tmp_path, capsys):
+        check, _, _ = wired
+        assert check.main(["--capture", "--state", str(tmp_path)]) == 2
         assert "cannot run" in capsys.readouterr().err
 
     def test_one_mode_is_required(self, wired):
@@ -403,3 +515,8 @@ class TestRunbookUsesIt:
         assert "main PID must change" in prose, (
             "the runbook should state the half that catches a skipped restart"
         )
+
+    def test_the_runbook_says_what_a_cannot_run_means(self, prose):
+        """Exit 2 covers age and permission refusals, so the operator must recapture."""
+        assert "Exit 2 is not a pass" in prose
+        assert "capture again" in prose

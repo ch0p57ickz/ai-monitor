@@ -438,12 +438,22 @@ systemctl is-active ai-monitor
 python3 tools/restart_check.py --verify
 ```
 
-The state file is `/tmp/ai-monitor-restart-state.json` and holds a PID and
-timestamps, no credentials. Rehearsed against the running service on 2026-10-19:
-without a restart, `--verify` reports `FAIL: the unit's main PID did not change`,
-which is the point of the PID half. Run it after the first restart, and after every
-upgrade. Run the tool from the checkout: the deployed copy is only as new as the last
-install.
+The state file is `/tmp/ai-monitor-restart-state.json`, mode `0600`, holding the host,
+unit, and URL, a PID, the capture time, and timestamps — no credentials. It is refused
+if another user owns it or could write it, so run both commands as the same user.
+
+Exit 2 is not a pass. It covers an unreachable API or unit; a unit name that matches
+nothing (`systemctl show` reports `MainPID=0` for any name, and exits 0); a state file
+captured on another host, unit, or URL; a capture more than 30 minutes old, or dated in
+the future; and a history response so truncated that an absent row cannot be told from
+one that fell outside the window. When it names the age, capture again, restart, and
+verify promptly — the response carries at most 500 rows and is capped by size, so a
+long gap between capture and verify cannot prove anything.
+
+Rehearsed against the running service on 2026-10-19: without a restart, `--verify`
+reports `FAIL: the unit's main PID did not change`, which is the point of the PID half.
+Run it after the first restart, and after every upgrade. Run the tool from the
+checkout: the deployed copy is only as new as the last install.
 
 ## Upgrade
 
