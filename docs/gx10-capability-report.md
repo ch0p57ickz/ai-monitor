@@ -386,7 +386,7 @@ Still outstanding for 5.2 and 5.4, all needing the host:
 | Intended clients present on the tailnet | `jamess-macbook-pro` (macOS), `iphone182-2` (iOS) |
 | Denied-device candidates | Tagged service nodes — `rumi`, `happier`, `mira`, `ranger`, `grafana`, `livesync`, `hermes`, `openclaw-gx10` — all `tag:agent`, owned by the `tagged-devices` identity rather than the operator |
 | Node ownership | Tagged `tag:zoey` as of 2026-10-19 (`tailscale status --json`, `Self.Tags`); user-owned and untagged before that |
-| Service (deployed) | Lower blast radius, and now in use: Service access needs an explicit `svc:` grant, so the allow-all *device* policy is untouched. `svc:ai-monitor` is advertised from the tagged `zoey`, with VIP `100.76.182.227` |
+| Service (deployed) | Lower blast radius, and now in use: access is expressed as a named `svc:` grant instead of narrowing the device rules, which stay untouched. Whether the allow-all *device* rule can also reach the VIP is not observable from this node, so only the device check proves the denial. `svc:ai-monitor` is advertised from the tagged `zoey`, with VIP `100.76.182.227` |
 | Plan | Publish the service port (bound to `127.0.0.1`) as the Service `svc:ai-monitor`, granted to the operator's devices only, with Funnel disabled. Deployed 2026-10-19; the device checks are still outstanding |
 
 ### Finding: the policy is allow-all, and its effect is observable
@@ -424,15 +424,53 @@ Two consequences:
 The device-level check still needs a device: from a `tag:agent` node, `443` should
 time out while `8443` still answers.
 
-A Service avoids the port-exclusion collateral altogether, because Service access
-is granted by a named `svc:` rule rather than by the node rules. The cost is that a
-Service host must be tag-based, so `zoey` has to be tagged, and the Service has to
+A Service avoids the port-exclusion collateral, because access to it is expressed
+as a named `svc:` grant rather than as a change to the node rules. The cost is that
+a Service host must be tag-based, so `zoey` has to be tagged, and the Service has to
 be advertised from `zoey` since the API binds loopback only. Checked against the
 docs rather than assumed: identity headers are filled from the *requester's*
 identity, so tagging the host does not strip them from the four existing routes;
 `RunSSH: false` on `zoey`, so no Tailscale SSH session is at risk; but
 `autogroup:self` and user-based selectors stop matching a tagged `zoey`, and
 tagging re-registers the node. The runbook has the ordered steps.
+
+What a grant does **not** do is appear as an exclusion in this node's packet
+filter, and an earlier version of this report said otherwise. See the finding
+below, which is the reason the device check is not optional.
+
+### Finding: a wildcard destination does reach a Service VIP
+
+This report, and the runbook with it, previously claimed that `*` in a grant
+expands to device addresses and approved subnet routes but not to a Service
+TailVIP, so the default allow-all policy could not reach a Service. A review caught
+the error, and Tailscale's filter code contradicts the claim — a wildcard
+destination parses into both zero prefixes:
+
+```go
+// wgengine/filter/tailcfg.go
+if arg == "*" {
+    // User explicitly requested wildcard.
+    return []netip.Prefix{
+        netip.PrefixFrom(zeroIP4, 0),
+        netip.PrefixFrom(zeroIP6, 0),
+    }, "", nil
+}
+```
+
+So this node's allow-all rule, whose destination is `IP: "*"` across every port,
+matches the Service VIP as readily as any device address. The separate filter rule
+naming the VIP does not establish the opposite either: the control plane emits one
+rule per policy rule, so a grant adds a rule without saying anything about the
+others.
+
+What remains true is narrower than what was written: Tailscale's Services
+documentation requires a grant — "Configure Service access" is the step that
+creates one — and Services route traffic with "access-controlled routing". Where
+that enforcement lands is not observable from `zoey`. The device check from a
+`tag:agent` node is therefore the only proof, and it is not optional: if it fails,
+the Service path does not meet task 5.3's denial requirement on this tailnet, and
+the node-route form — narrowing the device rules for the served port — is the
+fallback.
 
 ### Finding: adding a `grants` section can flip the tailnet to deny-by-default
 

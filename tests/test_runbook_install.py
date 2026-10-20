@@ -99,15 +99,20 @@ def test_no_git_step_runs_against_the_deployed_tree_as_the_service_account():
     check, so every git invocation against the deployed tree names
     `safe.directory` and runs as root.
     """
-    text = RUNBOOK.read_text("utf-8")
     commands = [
         line.strip()
-        for block in _shell_blocks(text)
+        for block in _shell_blocks(RUNBOOK.read_text("utf-8").replace("\\\n", " "))
         for line in block.splitlines()
-        if "-C /opt/ai-monitor" in line
-        or line.strip().startswith("sudo -u ai-monitor git")
+        if line.strip()
+        and not line.strip().startswith("#")
+        and "git" in line
+        and "/opt/ai-monitor" in line
     ]
-    assert commands, "the runbook should still document the git-deployed path"
+    # The upgrade and the rollback each document the git form, two commands each.
+    # A count, not a bare "at least one", so deleting one of the two forms fails.
+    assert len(commands) >= 4, (
+        f"the upgrade and the rollback should each document the git form: {commands}"
+    )
     for command in commands:
         assert command.startswith("sudo git "), (
             f"git against the deployed tree runs as root, not as the service "
@@ -126,32 +131,40 @@ def test_every_in_tree_build_clears_the_stale_build_directory():
     module from the tree, then reinstall — the module was still installed, and a
     wheel built from that tree contained it, because setuptools had kept it in
     `build/lib/`. The rsync cannot clear it either, since excluded paths survive
-    `--delete`. So every step that builds from the tree clears `build/` first: the
-    install, the upgrade, the rollback's git form, and the offline wheel build.
+    `--delete`.
+
+    The clear also needs `sudo`: /opt/ai-monitor is 0775 ai-monitor:ai-monitor, so
+    the operator cannot remove anything inside it. Comments are ignored, so a note
+    mentioning the command cannot stand in for running it.
     """
     building = [
         block
         for block in _shell_blocks(RUNBOOK.read_text("utf-8"))
         if "pip install /opt/ai-monitor" in block or "pip wheel" in block
     ]
-    assert len(building) == 4, (
-        f"install, upgrade, rollback and the wheel build each build in-tree: "
-        f"{len(building)}"
+    assert len(building) == 5, (
+        f"install, upgrade in both forms, rollback and the wheel build each build "
+        f"in-tree: {len(building)}"
     )
     for block in building:
-        first_build = min(
+        lines = [
+            line.strip()
+            for line in block.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        builds = [
             index
-            for index in (
-                block.find("pip install /opt/ai-monitor"),
-                block.find("pip wheel"),
+            for index, line in enumerate(lines)
+            if "pip install /opt/ai-monitor" in line or "pip wheel" in line
+        ]
+        assert builds, f"no build command found in this block:\n{block}"
+        for index in builds:
+            assert any(
+                line == "sudo rm -rf /opt/ai-monitor/build" for line in lines[:index]
+            ), (
+                f"`{lines[index]}` needs a preceding "
+                f"`sudo rm -rf /opt/ai-monitor/build`:\n{block}"
             )
-            if index != -1
-        )
-        cleared = block.find("rm -rf /opt/ai-monitor/build")
-        assert 0 <= cleared < first_build, (
-            "a build from the tree must clear build/ first, or a module the "
-            "previous revision deleted stays packaged:\n" + block
-        )
 
 
 def test_the_config_check_runs_as_the_service_account():

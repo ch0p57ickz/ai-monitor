@@ -301,8 +301,9 @@ wheel builds nothing, so the service host needs neither setuptools nor an index:
 ```sh
 # Build the wheel somewhere that has setuptools. --no-build-isolation uses that
 # interpreter's setuptools rather than downloading one, so it works offline; on a
-# host with network access you can omit the flag instead. Write the wheel outside
-# the checkout, or `dist/` appears as an untracked directory in /opt/ai-monitor.
+# host with network access you can omit the flag instead. `-w` keeps the wheel out
+# of the tree; what the build writes into the tree is `build/` and
+# `ai_monitor.egg-info/`.
 #
 # Build as the account that owns the tree, and clear `build/` first. Verified on
 # this host: run as the operator, this command fails with
@@ -427,13 +428,18 @@ sudo -u ai-monitor /opt/ai-monitor/venv/bin/ai-monitor --version
 curl -s http://127.0.0.1:8732/api/v1/version
 ```
 
-With git history on the host instead of an rsync copy, run the git steps as root
-and hand the tree back, since the service account cannot reach the source:
+With git history on the host instead of an rsync copy, the git steps replace the
+rsync above and run as root, because the service account cannot reach the source.
+They need the same install and restart that follow the rsync, and the same
+`build/` cleanup — a checkout alone does not change the installed package:
 
 ```sh
 sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor fetch --tags
 sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor checkout <tag-or-sha>
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
+sudo rm -rf /opt/ai-monitor/build
+sudo -u ai-monitor /opt/ai-monitor/venv/bin/pip install /opt/ai-monitor
+sudo systemctl restart ai-monitor
 ```
 
 Schema changes are applied on open; take a backup first (below). A failed
@@ -607,7 +613,7 @@ Observed:
 | --- | --- |
 | Self tag | `tag:zoey` |
 | Service | `svc:ai-monitor`, endpoint `tcp:443`, proxying `http://127.0.0.1:8732` |
-| Service VIP | `100.76.182.227` (`fd7a:115c:a1e0::6528:b6e4`), from `SelfNode.CapMap["service-host"]["svc:ai-monitor"]` |
+| Service VIP | `100.76.182.227` (`fd7a:115c:a1e0::6528:b6e4`), from `SelfNode.CapMap["service-host"][0]["svc:ai-monitor"]` — the capability is a list of maps, so the index is required |
 | DNS | `ai-monitor.tail831c33.ts.net` resolves to the VIP |
 | Publication | `(tailnet only)`; Funnel off for every mapping |
 | The four earlier routes | `3773`, `8443`, `8444`, `8445` still published and tailnet-only; `8443` and `8444` answer HTTP 200 from the host |
@@ -615,17 +621,24 @@ Observed:
 | Device rules | the allow-all device rule is untouched, which is why the four earlier routes are unaffected |
 | Backend | nothing listens on `8732` until task 5.2 starts the service, so the Service answers 502 in the meantime |
 
-The Service path restricts anything at all for a reason visible in the packet
-filter: `*` in a grant expands to *device* addresses, so the allow-all rule that
-covers every device on every port does **not** cover a Service VIP. A Service is
-reachable only through its own grant, which is what makes the denial check
-possible without narrowing the device rules.
+**The packet filter does not show where a Service is restricted, so do not read it
+as proof.** In Tailscale's filter code, a wildcard destination (`IP: "*"`) parses
+to `0.0.0.0/0` and `::/0`, so the allow-all rule in this node's filter matches the
+Service VIP as readily as any device address. The control plane also emits a
+separate rule for the VIP whose sources are the operator's devices, but the
+presence of that rule does not establish that the allow-all rule fails to reach
+the VIP. What the Services documentation requires is a grant, and Services route
+traffic with "access-controlled routing", which is where the restriction lives.
+
+The enforcement point is therefore not observable from this node, and the device
+run in the acceptance checks is what proves the denial — not this filter. **If a
+`tag:agent` node turns out to reach the Service, the Service path does not satisfy
+the requirement on this tailnet**, and the node-route form above is the fallback.
 
 The other two Services advertised from this node, `svc:router-litellm` and
-`svc:vllm`, have no grant, so the packet filter carries no rule for their VIPs.
-Under Tailscale's model they are not reachable until one is added. Nothing that
-worked before depends on them: the device routes `8444` and `8445` still publish
-the same two backends (`4002` and `8000`).
+`svc:vllm`, have no grant naming them, and no rule in this node's filter mentions
+their VIPs. Nothing that worked before depends on them either way: the device
+routes `8444` and `8445` still publish the same two backends (`4002` and `8000`).
 
 ### Host state as surveyed (2026-10-19)
 
@@ -745,10 +758,18 @@ A Service is the cleaner mechanism for this restriction, and it avoids the globa
 port exclusion above entirely. Service access is granted explicitly — a
 `dst: ["svc:<name>"]` rule — so the denial is a positive statement rather than an
 allow-all that has to be dismantled. Tailscale's wording is that users and devices
-"must explicitly be granted access to a service via Grants". The `*` wildcard
-expands to *device* addresses and approved subnet routes, not to a Service's
-TailVIP, so the default allow-all policy does not reach a Service and no other
-node's rules are affected.
+"must explicitly be granted access to a service via Grants", and the Services
+documentation's "Configure Service access" step is to create a grant rule that
+grants access to the Service.
+
+**Do not claim more than that.** An earlier version of this section said the `*`
+wildcard expands to device addresses and not to a Service VIP, so the allow-all
+policy could not reach a Service. That is wrong at the filter layer: a wildcard
+destination parses to `0.0.0.0/0` and `::/0`, so this node's allow-all rule matches
+the VIP too. The grant is what Tailscale's model requires, but the enforcement
+point is not observable from `zoey`, so the device run in the acceptance checks is
+what proves the denial. If a `tag:agent` node reaches the Service, this path does
+not meet the requirement on this tailnet, and the node-route form is the fallback.
 
 The cost is one requirement, stated as a warning in the Services documentation:
 **a Service host must use a tag-based identity.** A device authenticated with a
