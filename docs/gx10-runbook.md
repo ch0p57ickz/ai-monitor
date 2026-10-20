@@ -209,6 +209,15 @@ sudoedit /etc/ai-monitor/config.json   # set codex_bin, the agy path, keys
 # Generate the account digest key used to derive opaque account ids. Without
 # it, account-scoped trends (same-account pace, spend deltas) are disabled and
 # the service logs a warning at startup. It must be at least 16 characters.
+#
+# It is an HMAC key, not a provider credential: nothing sends it anywhere, and
+# no collection stops without it. Two things follow:
+#   - keep it: account ids are HMAC(key, "<source>:<identity>"), so changing the
+#     key changes every id, and rows recorded before the change stop joining the
+#     new ones. Same-account trends then restart from nothing.
+#   - keep it private: with the database and this key, a guessed email can be
+#     confirmed as an account. It stays in this 0640 file, and the redactor
+#     masks it if it ever reaches a log line.
 python3 -c 'import secrets; print(secrets.token_hex(32))'
 # Then set "account_digest_key" to that value in the config.
 
