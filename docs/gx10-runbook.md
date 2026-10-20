@@ -245,12 +245,11 @@ sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree: ok"
 
 # Any line missing above means fixing that thing before starting. A tree copied
 # without the step 2 allowlist also carries `.gitignore`, `tests/`, `openspec/`,
-# `build/`, and `.pytest_cache/`; none belong here, and `.env` is the one that
-# matters, because this repository keeps it at mode 0664 and /opt is
-# world-traversable:
-#
-#   sudo rm -f /opt/ai-monitor/.env
-#   sudo test ! -e /opt/ai-monitor/.env && echo "gone"
+# `build/`, and `.pytest_cache/`; none belong here. `.env` is the one that matters:
+# this repository keeps it at mode 0664 under a world-traversable /opt, so remove it
+# from the deployment tree even if the check above passed, and confirm it is gone.
+sudo rm -f /opt/ai-monitor/.env
+sudo test ! -e /opt/ai-monitor/.env && echo "gone"
 
 sudo systemctl enable --now ai-monitor
 
@@ -401,6 +400,7 @@ sudo rsync -a --delete \
   --exclude '*' \
   /path/to/this/checkout/ /opt/ai-monitor/
 sudo chown -R ai-monitor:ai-monitor /opt/ai-monitor
+sudo rm -f /opt/ai-monitor/.env
 sudo test ! -e /opt/ai-monitor/.env && echo "no .env in the deployment tree"
 
 # Clear the build artifacts first. `pip install <dir>` builds in place, and
@@ -429,9 +429,11 @@ curl -s http://127.0.0.1:8732/api/v1/version
 ```
 
 With git history on the host instead of an rsync copy, the git steps replace the
-rsync above and run as root, because the service account cannot reach the source.
-They need the same install and restart that follow the rsync, and the same
-`build/` cleanup — a checkout alone does not change the installed package:
+rsync above. They run as root for two reasons: the service account cannot reach the
+source to fetch from, and a root-run git inside an ai-monitor-owned tree trips the
+dubious-ownership check. They need the same install and restart that follow the
+rsync, and the same `build/` cleanup — a checkout alone does not change the
+installed package:
 
 ```sh
 sudo git -c safe.directory=/opt/ai-monitor -C /opt/ai-monitor fetch --tags
@@ -446,11 +448,8 @@ Schema changes are applied on open; take a backup first (below). A failed
 upgrade is reverted by checking out the previous revision and repeating the
 `pip install` and restart.
 
-Rollback is the same three steps with the earlier revision, and the same version
-check confirms it took: check out the previous `<tag-or-sha>`, reinstall, restart,
-then compare `--version` and `/api/v1/version` against the release you intended.
-A rollback that leaves the service announcing the newer version means the install
-did not replace the package.
+Reverting is the same steps with an earlier revision — see Rollback for the two
+layouts and the version check that confirms the install took.
 
 ## Backup
 
@@ -578,11 +577,22 @@ journalctl -u ai-monitor --since '5 min ago' --no-pager | grep -Ei 'bearer|sk-|@
 ## Tailscale Serve (task 5.3, deployed 2026-10-19)
 
 The service binds `127.0.0.1` only. Publication is via Tailscale Serve, never
-Funnel:
+Funnel. The deployed form publishes a **Service**, which is the one that can carry
+a device restriction on this tailnet:
+
+```sh
+# In use. The Service must already be defined in the console, and zoey tagged.
+# --bg defaults to true when --service is set.
+sudo tailscale serve --service=svc:ai-monitor --https=443 http://127.0.0.1:8732
+tailscale serve status
+tailscale funnel status
+```
+
+The device form, which publishes `https://zoey.tail831c33.ts.net/` and cannot be
+restricted while the policy is allow-all, is the fallback:
 
 ```sh
 sudo tailscale serve --bg --https=443 http://127.0.0.1:8732
-tailscale serve status
 ```
 
 `tailscale serve status` and `tailscale funnel status` run without `sudo` on this
@@ -616,10 +626,12 @@ Observed:
 | Service VIP | `100.76.182.227` (`fd7a:115c:a1e0::6528:b6e4`), from `SelfNode.CapMap["service-host"][0]["svc:ai-monitor"]` — the capability is a list of maps, so the index is required |
 | DNS | `ai-monitor.tail831c33.ts.net` resolves to the VIP |
 | Publication | `(tailnet only)`; Funnel off for every mapping |
-| The four earlier routes | `3773`, `8443`, `8444`, `8445` still published and tailnet-only; `8443` and `8444` answer HTTP 200 from the host |
+| The four earlier routes | `3773`, `8443`, `8444`, `8445` still published and tailnet-only; `curl -sk https://zoey.tail831c33.ts.net:8443/` and `...:8444/` answer 200. The mappings bind the tailnet address, so `127.0.0.1` does not answer |
 | Service access | one packet-filter rule for the VIP, admitting the operator's devices and no `tag:agent` node |
 | Device rules | the allow-all device rule is untouched, which is why the four earlier routes are unaffected |
-| Backend | nothing listens on `8732` until task 5.2 starts the service, so the Service answers 502 in the meantime |
+
+The table is observations only. One consequence is not: nothing listens on `8732`
+until task 5.2 starts the service, so the Service has no backend until then.
 
 **The packet filter does not show where a Service is restricted, so do not read it
 as proof.** In Tailscale's filter code, a wildcard destination (`IP: "*"`) parses
@@ -627,8 +639,9 @@ to `0.0.0.0/0` and `::/0`, so the allow-all rule in this node's filter matches t
 Service VIP as readily as any device address. The control plane also emits a
 separate rule for the VIP whose sources are the operator's devices, but the
 presence of that rule does not establish that the allow-all rule fails to reach
-the VIP. What the Services documentation requires is a grant, and Services route
-traffic with "access-controlled routing", which is where the restriction lives.
+the VIP. What the Services documentation requires is a grant, and it describes
+Services as using "access-controlled routing" — that is where the restriction is
+meant to be applied.
 
 The enforcement point is therefore not observable from this node, and the device
 run in the acceptance checks is what proves the denial — not this filter. **If a
@@ -646,7 +659,7 @@ routes `8444` and `8445` still publish the same two backends (`4002` and `8000`)
 | --- | --- |
 | Node | `zoey` (`100.108.85.109`) |
 | Tailnet domain | `zoey.tail831c33.ts.net` |
-| Served URL after this change | `https://zoey.tail831c33.ts.net/` (port 443 needs no suffix) |
+| Served URL after this change | `https://ai-monitor.tail831c33.ts.net/` — the Service DNS name. Port `443` on `zoey` itself is not served |
 | Ports already served, tailnet only | `3773`, `8443`, `8444`, `8445` |
 | Port 443 | free — not among the served mappings, and `ss -ltn` shows nothing listening on it |
 | `127.0.0.1:8732` | free — the service's `api_port`, per `ss -ltn` |
