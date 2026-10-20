@@ -815,7 +815,7 @@ question, and only a request from a `tag:agent` node answers it. **If that reque
 returns data, the Service path does not meet task 5.3's denial requirement and the
 node-route form — narrowing the device rules for the served port — is the fallback.**
 
-### The restart happened, and it exposed a credential gap
+### The restart survived the data, and exposed a credential gap (resolved)
 
 The operator restarted the unit at **18:49:53 PDT** (01:49:53 UTC; `MainPID` 3478058 →
 3564896, `Result=success`). This is the restart 5.2 asks about.
@@ -824,9 +824,8 @@ It preserved the data. Afterwards, `/api/v1/usage/history` still served 48 of th
 rows the previous process had collected, the oldest from its first collection at
 18:15:34 PDT, and none of them were re-collected. Rows recorded by a process that no
 longer exists were still served by its replacement, which is the property the criterion
-names. A strict `tools/restart_check.py` `--capture`/`--verify` cycle has not been run:
-the capture was attempted while the unit was down and exited 2 with
-`Connection refused`, which is the tool's skip path rather than a defect.
+names. The restart at 18:55:55 showed the same thing at 57 of 60 rows, oldest unchanged
+at 18:15:34.
 
 **The restart also came back without the OpenRouter credentials.** `/health` now reports
 `operator_action` with `errorCategory: not_configured` for both OpenRouter sources,
@@ -843,9 +842,30 @@ widget looks correct for minutes after collection has stopped. `/health` is the 
 that shows it, and `serviceStatus` stays `degraded` either way, because `antigravity` is
 always `unavailable` on this host.
 
-Until the key is restored and the unit restarted, OpenRouter data is frozen at 18:45:40
-and nothing further is collected. Task 5.2's "credential access" clause is not met at
-present, and `account_digest_key` remains unset.
+**Resolved the same session.** The operator restored the key in
+`/etc/ai-monitor/config.json` and restarted at 18:55:55: `/health` returned
+`openrouter-account` and `openrouter-key` healthy with fresh successes at
+01:55:55 UTC, so the deployed unit does read the config credential, and 5.2's
+"credential access" clause holds.
+
+The strict restart check then passed. `--capture` recorded pid `3582139` and the three
+timestamps it was serving; the restart at 18:58:18 changed the pid to `3586981`;
+`--verify` reported
+
+```text
+pid: 3582139 -> 3586981
+timestamps: 3 captured, 3 still served (65 rows returned, captured 104 s ago)
+ok: a new process serves the observations collected before it started
+```
+
+The log and response scans were repeated with the credential live in the process: 0
+matches for `sk-or-`, `sk-`, `bearer`, `api_key`, `password`, or the login name since
+the restart, and 0 in `/health`, `/api/v1/usage`, `/api/v1/version`, and the history
+response, with no `[redacted]` or `***` markers either.
+
+`account_digest_key` remains unset, which is the documented degraded mode rather than a
+defect: `accountId` is null, account-scoped trends are off, and one startup warning says
+so.
 
 ## Capability summary for adapter enablement
 

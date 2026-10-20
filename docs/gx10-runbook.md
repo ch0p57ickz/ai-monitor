@@ -4,16 +4,16 @@ Commands for starting, upgrading, backing up, rolling back, and rotating
 credentials for the loopback usage service on the GX10 host (`zoey`).
 
 **Verification status:** the install has run on this host and the service is serving
-real data (`5.2`, live since 2026-10-19 18:15 PDT): the unit, the virtualenv, the
+real data (`5.2`, live since 2026-10-19 18:15:34 PDT): the unit, the virtualenv, the
 config, and the guards over the example config and the install steps all stand behind
-what is written here, and the backup/restore procedure was executed end to end against
-a live service by `tools/backup_restore_check.py`.
+what is written here. The backup and restore procedure was executed end to end against a
+live service by `tools/backup_restore_check.py`, and the restart check has now been run
+for real — `tools/restart_check.py` passed at 18:58:18 PDT after the operator restored
+the OpenRouter key the previous restart had come back without.
 
-Still reviewed-but-unexecuted on the deployed host: **the restart-preservation check**
-(the procedure below; no restart has been run yet, so `tools/restart_check.py` has been
-rehearsed only to its `FAIL` path), the **Tailscale device checks** (`5.3`, which need
-the operator's devices), and the root commands for **upgrade, backup, rollback, and
-credential rotation** (`5.4`).
+Still reviewed-but-unexecuted on the deployed host: the **Tailscale device checks**
+(`5.3`, which need the operator's devices) and the root commands for **upgrade, backup,
+rollback, and credential rotation** (`5.4`).
 
 ## Layout
 
@@ -470,12 +470,23 @@ pre-restart observations as `fresh`, so the widget looks right for a few minutes
 collection has already stopped — the rows only go stale at their `staleAfter`
 timestamp, which was 18:55:40 here.
 
-That same restart is the data-side evidence 5.2 asks for: the new process still served
-48 of the 49 rows the previous one had collected, the oldest from its first collection
-at 18:15:34, and none of them were re-collected. Run a strict `--capture`/`--verify`
-cycle at the next restart. The first attempt here exited 2 with `Connection refused`
-because the capture ran while the unit was down, which is the skip path working as
-intended rather than a defect.
+That same restart began the data-side evidence 5.2 asks for, and three restarts have
+since confirmed it, one of them through the tool:
+
+- The restart at 18:49:53 served 48 of the 49 rows the previous process had collected,
+  the oldest from its first collection at 18:15:34, none of them re-collected.
+- The restart at 18:55:55 served 57 of 60 rows, the oldest still 18:15:34.
+- The restart at 18:58:18 was the strict cycle: `--capture` recorded pid `3582139` and
+  the three timestamps it was serving, and `--verify` returned `ok: a new process serves
+  the observations collected before it started`, with 3 captured and 3 still served out
+  of 65 rows.
+
+The first `--capture` attempt exited 2 with `Connection refused` because it ran inside a
+restart's stop/start window. That window is about half a second here — the old process
+logs `received signal 15` and the new one logs `serving on` within the same second — so a
+command chained straight after `systemctl restart` can land in it. Add `sleep 1` when
+chaining, and expect a bare `curl` piped to `json.tool` to report `Expecting value: line
+1 column 1 (char 0)` in that window rather than a service fault.
 
 ## Upgrade
 
